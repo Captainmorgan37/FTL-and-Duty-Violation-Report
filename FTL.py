@@ -67,7 +67,6 @@ if ftl_file is not None:
 
     # Merge back 7d / 30d columns from original FTL file
     if "7d" in ftl.columns and "30d" in ftl.columns:
-        # Take the *last* row per pilot/day (FL3XX rolling totals)
         ftl_totals = ftl.groupby(["Name", "Date_parsed"]).agg(
             hrs7d=("7d", "last"),
             hrs30d=("30d", "last")
@@ -117,7 +116,7 @@ if ftl_file is not None:
             else:
                 consec = 0
 
-    # 3) >40h in 7 days (unless <70h in 30 days) — now using FL3XX values
+    # 3) >40h in 7 days (unless <70h in 30 days) — use FL3XX values
     if "hrs7d" in grp.columns and "hrs30d" in grp.columns:
         for _, r in grp.iterrows():
             try:
@@ -165,3 +164,10 @@ if ftl_file is not None:
                 st.write("- " + e)
         else:
             st.success("No exceedances found.")
+
+    # --- Debug table ---
+    st.subheader("Debug Data (per pilot/day)")
+    debug = grp[["Name", "Date_parsed", "FDP_min", "turn_min", "hrs7d", "hrs30d"]].copy()
+    debug["FDP_min"] = debug["FDP_min"].apply(lambda x: f"{x/60:.2f}h" if pd.notna(x) else None)
+    debug["turn_min"] = debug["turn_min"].apply(lambda x: f"{x/60:.2f}h" if pd.notna(x) else None)
+    st.dataframe(debug, use_container_width=True)
