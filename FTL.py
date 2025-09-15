@@ -24,18 +24,12 @@ def parse_hhmm_from_text(val):
         return None
 
 def duration_to_minutes(val):
-    """
-    Convert FL3XX duration formats to minutes.
-    Accepts: 'HH:MM', 'HH:MM:SS', 'H:MM', numeric strings, or numbers.
-    Returns float minutes or None.
-    """
+    """Convert FL3XX duration formats (HH:MM, HH:MM:SS) to minutes."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     s = str(val).strip()
-    # Empty or 'None'
     if s == "" or s.lower() == "none":
         return None
-    # If looks like H:M(:S)
     if ":" in s:
         parts = s.split(":")
         try:
@@ -45,9 +39,7 @@ def duration_to_minutes(val):
         except Exception:
             return None
         return h*60 + m + sec/60.0
-    # fallback numeric
     try:
-        # treat as hours if a plain number; convert to minutes
         return float(s) * 60.0
     except Exception:
         return None
@@ -60,17 +52,16 @@ def minutes_to_hours(mins):
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
 
-
 # ---------- FDP consolidation ----------
 def consolidate_fdps(ftl):
     """
-    Build true FDP blocks per pilot by walking rows in time order.
-    Split/close an FDP when:
-      - 'Start Duty' cell contains '(split)' (new start),
-      - 'Blocks On' cell contains 'Rest' (end),
-      - a NEW non-empty 'Start Duty' occurs after an active period (new start),
+    Build true FDP blocks per pilot.
+    Splits/close an FDP when:
+      - '(split)' in Start Duty,
+      - 'Rest' in Blocks On,
+      - new Start Duty after an active one,
       - pilot changes.
-    Carry forward latest '7d'/'30d' cumulative values into each FDP.
+    Each FDP carries a flag 'split' if it originated from a split/rest.
     """
     ftl = ftl.sort_values(["Name", "Date_parsed", "RowOrder"]).reset_index(drop=True)
 
@@ -88,25 +79,22 @@ def consolidate_fdps(ftl):
 
         is_split = "(split)" in sd_raw
         is_rest  = "Rest" in bo_raw
-        is_new_start_cell = start_t is not None  # non-empty start cell signals a (potential) new FDP
+        is_new_start_cell = start_t is not None
 
-        # Start new FDP if none or pilot changed
         if cur is None or name != cur["Name"]:
-            # close previous (if any)
             if cur is not None:
                 periods.append(cur)
-            # open new
             cur = {
                 "Name": name,
                 "Date": date,
                 "duty_start": start_t,
                 "blocks_on": end_t,
-                "hrs7d": row["hrs7d"],   # hours (float)
-                "hrs30d": row["hrs30d"], # hours (float)
+                "hrs7d": row["hrs7d"],
+                "hrs30d": row["hrs30d"],
+                "split": False
             }
             continue
 
-        # Same pilot: if we detect an explicit split/new start OR explicit rest → close current and start a new one
         if is_split or is_rest or (is_new_start_cell and cur["duty_start"] is not None and start_t is not None):
             periods.append(cur)
             cur = {
@@ -116,86 +104,75 @@ def consolidate_fdps(ftl):
                 "blocks_on": end_t,
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
+                "split": True   # mark as split-origin
             }
             continue
 
-        # Otherwise we're still within the same FDP; extend end time if present
         if end_t is not None:
             cur["blocks_on"] = end_t
-
-        # Carry latest cumulative counters
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-    # Flush last
     if cur is not None:
         periods.append(cur)
 
     return pd.DataFrame(periods)
 
-
 # ---------- File upload ----------
 uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
 
 if uploaded:
-    # Try to read with flexible encoding/separator
     try:
         ftl = pd.read_csv(uploaded, engine="python")
-        # Forward-fill pilot names (FL3XX only gives name in first row)
-        ftl["Name"] = ftl["Name"].ffill()
-
     except Exception:
         ftl = pd.read_csv(uploaded)
 
-    # Add a stable row order before sorting (to preserve original sequence within same timestamps)
-    ftl["RowOrder"] = range(len(ftl))
+    # Forward-fill names (FL3XX leaves blanks after first row per pilot)
+    ftl["Name"] = ftl["Name"].ffill()
 
-    # Flexible date parsing
+    ftl["RowOrder"] = range(len(ftl))
     ftl["Date_parsed"] = pd.to_datetime(ftl["Date"], errors="coerce").dt.date
 
-    # Extract times even when text has '(split)' or 'Rest'
     ftl["StartDuty_t"] = ftl["Start Duty"].apply(parse_hhmm_from_text)
     ftl["BlocksOn_t"]  = ftl["Blocks On"].apply(parse_hhmm_from_text)
 
-    # Parse FL3XX rolling totals to HOURS (floats)
-    # These columns are usually HH:MM:SS; we convert to minutes then to hours.
     ftl["hrs7d"]  = ftl["7d"].apply(duration_to_minutes).apply(minutes_to_hours)  if "7d"  in ftl.columns else pd.NA
     ftl["hrs30d"] = ftl["30d"].apply(duration_to_minutes).apply(minutes_to_hours) if "30d" in ftl.columns else pd.NA
 
     # Consolidate into FDPs
     fdp = consolidate_fdps(ftl)
 
-    # Compute FDP length in minutes (start -> blocks_on + 15 min), with midnight roll handling
+    # FDP length
     fdp["FDP_min"] = None
     for i, r in fdp.iterrows():
         s = to_dt(r["Date"], r["duty_start"])
         e = to_dt(r["Date"], r["blocks_on"])
         if s is None or e is None:
             continue
-        e = e + timedelta(minutes=15)  # company policy
+        e = e + timedelta(minutes=15)  # policy
         if e < s:
-            e += timedelta(days=1)      # cross-midnight
+            e += timedelta(days=1)      # midnight rollover
         fdp.at[i, "FDP_min"] = (e - s).total_seconds() / 60.0
     fdp["FDP_hrs"] = fdp["FDP_min"].apply(minutes_to_hours)
 
-    # Turn to next duty (prev end +15 -> next start)
+    # Turn to next duty (ignore split FDPs)
     fdp = fdp.sort_values(["Name", "Date", "duty_start", "blocks_on"]).reset_index(drop=True)
     fdp["Turn_min"] = None
     for i in range(1, len(fdp)):
         if fdp.loc[i, "Name"] == fdp.loc[i-1, "Name"]:
-            prev_end = to_dt(fdp.loc[i-1, "Date"], fdp.loc[i-1, "blocks_on"])
-            cur_start = to_dt(fdp.loc[i, "Date"], fdp.loc[i, "duty_start"])
-            if prev_end is not None and cur_start is not None:
-                prev_end = prev_end + timedelta(minutes=15)
-                # If next start is earlier than prev end (date may not have advanced in CSV), move to next day
-                if cur_start < prev_end:
-                    cur_start = cur_start + timedelta(days=1)
-                fdp.at[i, "Turn_min"] = (cur_start - prev_end).total_seconds() / 60.0
+            if not fdp.loc[i, "split"]:   # only check true overnight turn
+                prev_end = to_dt(fdp.loc[i-1, "Date"], fdp.loc[i-1, "blocks_on"])
+                cur_start = to_dt(fdp.loc[i, "Date"], fdp.loc[i, "duty_start"])
+                if prev_end is not None and cur_start is not None:
+                    prev_end = prev_end + timedelta(minutes=15)
+                    if cur_start < prev_end:
+                        cur_start += timedelta(days=1)
+                    fdp.at[i, "Turn_min"] = (cur_start - prev_end).total_seconds() / 60.0
     fdp["Turn_hrs"] = fdp["Turn_min"].apply(minutes_to_hours)
 
-    # ---------- Rule checks (safe numeric comparisons) ----------
+    # ---------- Rule checks ----------
     issues = []
     def add_issue(name, date, rule, details):
         issues.append({"Name": name, "Date": date, "Rule": rule, "Details": details})
@@ -206,24 +183,20 @@ if uploaded:
         hrs7 = r["hrs7d"] if pd.notna(r["hrs7d"]) else None
         hrs30 = r["hrs30d"] if pd.notna(r["hrs30d"]) else None
 
-        # FDP > 14h
         if fdp_min is not None and fdp_min > 14*60:
             add_issue(r["Name"], r["Date"], "FDP >14h", f"FDP {minutes_to_hours(fdp_min)}h")
 
-        # Min turn < 10h
         if turn_min is not None and turn_min < 10*60:
             add_issue(r["Name"], r["Date"], "Turn <10h", f"Turn {minutes_to_hours(turn_min)}h")
 
-        # 7d > 40h AND 30d >= 70h  (using FL3XX totals in HOURS)
         if hrs7 is not None and hrs30 is not None and hrs7 > 40 and hrs30 >= 70:
-            add_issue(r["Name"], r["Date"], "7d>40h + 30d≥70h",
-                      f"7d {hrs7:.1f}h, 30d {hrs30:.1f}h")
+            add_issue(r["Name"], r["Date"], "7d>40h + 30d≥70h", f"7d {hrs7:.1f}h, 30d {hrs30:.1f}h")
 
     issues_df = pd.DataFrame(issues)
 
     # ---------- UI ----------
     st.subheader("Consolidated FDPs (debug)")
-    dbg_cols = ["Name", "Date", "duty_start", "blocks_on", "FDP_hrs", "Turn_hrs", "hrs7d", "hrs30d"]
+    dbg_cols = ["Name", "Date", "duty_start", "blocks_on", "FDP_hrs", "Turn_hrs", "hrs7d", "hrs30d", "split"]
     st.dataframe(fdp[dbg_cols], use_container_width=True)
 
     st.subheader("Exceedances Detected")
