@@ -16,7 +16,7 @@ This app highlights exceedances in the same format as your manual template:
 
 ftl_file = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
 
-# --- Helper functions ---
+# --- Helpers ---
 def parse_date(s):
     try:
         return datetime.strptime(str(s), "%d.%m.%Y").date()
@@ -36,9 +36,11 @@ def parse_time(s):
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
 
-# --- Main logic ---
+# --- Main ---
 if ftl_file is not None:
     ftl = pd.read_csv(ftl_file, encoding="utf-8", engine="python")
+
+    # Parse dates and times
     ftl["Date_parsed"] = ftl["Date"].apply(parse_date)
     ftl["StartDuty_t"] = ftl["Start Duty"].apply(parse_time)
     ftl["BlocksOn_t"] = ftl["Blocks On"].apply(parse_time)
@@ -46,7 +48,7 @@ if ftl_file is not None:
     # Aggregate per pilot/day
     grp = ftl.groupby(["Name", "Date_parsed"]).agg(
         duty_start=("StartDuty_t", "min"),
-        blocks_on=("BlocksOn_t", "max")
+        blocks_on=("BlocksOn_t", "max"),
     ).reset_index()
 
     # FDP calc (Start Duty → Blocks On + 15min)
@@ -63,16 +65,20 @@ if ftl_file is not None:
             FDP_min.append(None)
     grp["FDP_min"] = FDP_min
 
-    # --- Exceedance buckets ---
-    ex_2consec = []
-    ex_3consec = []
-    ex_40in7 = []
-    ex_other = []
+    # Merge back 7d / 30d columns from original FTL file
+    if "7d" in ftl.columns and "30d" in ftl.columns:
+        # Take the *last* row per pilot/day (FL3XX rolling totals)
+        ftl_totals = ftl.groupby(["Name", "Date_parsed"]).agg(
+            hrs7d=("7d", "last"),
+            hrs30d=("30d", "last")
+        ).reset_index()
+        grp = pd.merge(grp, ftl_totals, on=["Name", "Date_parsed"], how="left")
 
-    # Calculate turn to next day
+    # Calculate next-day turn
     grp = grp.sort_values(["Name", "Date_parsed"])
     grp["next_start"] = grp.groupby("Name")["duty_start"].shift(-1)
     grp["next_date"] = grp.groupby("Name")["Date_parsed"].shift(-1)
+
     turn_min = []
     for _, r in grp.iterrows():
         if pd.isna(r["next_date"]) or r["blocks_on"] is None or r["next_start"] is None:
@@ -82,6 +88,9 @@ if ftl_file is not None:
         start_dt = to_dt(r["next_date"], r["next_start"])
         turn_min.append((start_dt - end_dt).total_seconds() // 60 if start_dt and end_dt else None)
     grp["turn_min"] = turn_min
+
+    # --- Exceedance buckets ---
+    ex_2consec, ex_3consec, ex_40in7, ex_other = [], [], [], []
 
     # 1) Two consecutive <11h turns
     grp["short_turn"] = grp["turn_min"] < 11*60
@@ -108,19 +117,16 @@ if ftl_file is not None:
             else:
                 consec = 0
 
-    # 3) >40h in 7 days (unless OK <70h/30)
-    for name, g in grp.groupby("Name"):
-        g = g.sort_values("Date_parsed")
-        for i in range(len(g)):
-            window = g.iloc[max(0, i-6):i+1]
-            if window["FDP_min"].notna().any():
-                hours7 = window["FDP_min"].sum()/60
-                # 30-day total
-                d0 = g.iloc[i]["Date_parsed"]
-                window30 = g[(g["Date_parsed"] >= d0 - timedelta(days=29)) & (g["Date_parsed"] <= d0)]
-                hours30 = window30["FDP_min"].sum()/60
-                if hours7 > 40 and hours30 >= 70:
-                    ex_40in7.append(f"{name} — {d0} (7d {hours7:.1f}h, 30d {hours30:.1f}h)")
+    # 3) >40h in 7 days (unless <70h in 30 days) — now using FL3XX values
+    if "hrs7d" in grp.columns and "hrs30d" in grp.columns:
+        for _, r in grp.iterrows():
+            try:
+                hrs7 = float(r["hrs7d"])
+                hrs30 = float(r["hrs30d"])
+            except Exception:
+                continue
+            if hrs7 > 40 and hrs30 >= 70:
+                ex_40in7.append(f"{r['Name']} — {r['Date_parsed']} (7d {hrs7:.1f}h, 30d {hrs30:.1f}h)")
 
     # 4) Other exceedances (catch-all baseline: FDP >14h, turn <10h)
     for _, r in grp.iterrows():
@@ -129,7 +135,7 @@ if ftl_file is not None:
         if r["turn_min"] and r["turn_min"] < 10*60:
             ex_other.append(f"{r['Name']} — {r['Date_parsed']} (Turn {r['turn_min']/60:.2f}h)")
 
-    # --- Display in manual box style ---
+    # --- Display ---
     st.subheader("Potential Duty Exceedances")
 
     with st.expander("2 Consecutive <11 hour turns (Rest Before FDP)", expanded=True):
