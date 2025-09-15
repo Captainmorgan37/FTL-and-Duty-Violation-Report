@@ -17,15 +17,6 @@ This app highlights exceedances in the same format as your manual template:
 ftl_file = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
 
 # --- Helpers ---
-def parse_date(s):
-    try:
-        return datetime.strptime(str(s), "%d.%m.%Y").date()
-    except Exception:
-        try:
-            return pd.to_datetime(s).date()
-        except Exception:
-            return pd.NaT
-
 def parse_time(s):
     s = str(s).strip()
     try:
@@ -40,12 +31,12 @@ def to_dt(d, t):
 if ftl_file is not None:
     ftl = pd.read_csv(ftl_file, encoding="utf-8", engine="python")
 
-    # Parse dates and times
-    ftl["Date_parsed"] = ftl["Date"].apply(parse_date)
+    # Flexible date parsing
+    ftl["Date_parsed"] = pd.to_datetime(ftl["Date"], errors="coerce").dt.date
     ftl["StartDuty_t"] = ftl["Start Duty"].apply(parse_time)
     ftl["BlocksOn_t"] = ftl["Blocks On"].apply(parse_time)
 
-    # Aggregate per pilot/day
+    # Aggregate per pilot/day (1 row per duty day)
     grp = ftl.groupby(["Name", "Date_parsed"]).agg(
         duty_start=("StartDuty_t", "min"),
         blocks_on=("BlocksOn_t", "max"),
