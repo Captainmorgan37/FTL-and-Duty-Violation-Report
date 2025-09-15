@@ -143,6 +143,9 @@ if uploaded:
     # Try to read with flexible encoding/separator
     try:
         ftl = pd.read_csv(uploaded, engine="python")
+        # Forward-fill pilot names (FL3XX only gives name in first row)
+        ftl["Name"] = ftl["Name"].ffill()
+
     except Exception:
         ftl = pd.read_csv(uploaded)
 
