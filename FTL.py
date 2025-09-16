@@ -64,7 +64,7 @@ def consolidate_fdps(ftl):
         is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
         is_rest = "rest" in reason_raw.lower()
 
-        # --- New: if explicit rest, close out current duty and reset ---
+        # --- Explicit Rest row cuts the duty chain ---
         if is_rest:
             if cur is not None:
                 periods.append(cur)
@@ -88,7 +88,7 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # --- If split duty or new start of FDP ---
+        # --- If split duty or new FDP start ---
         if is_split or is_new_start:
             periods.append(cur)
             cur = {
@@ -123,7 +123,6 @@ def consolidate_fdps(ftl):
 
     return pd.DataFrame(periods)
 
-
 # ---------- File upload ----------
 uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
 
@@ -146,29 +145,31 @@ if uploaded:
     fdp = consolidate_fdps(ftl)
 
     # FDP + Duty length
-fdp["FDP_min"] = None
-fdp["Duty_min"] = None
+    fdp["FDP_min"] = None
+    fdp["Duty_min"] = None
 
-for i, r in fdp.iterrows():
-    s = to_dt(r["Date"], r["duty_start"])
-    fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
-    duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
+    for i, r in fdp.iterrows():
+        s = to_dt(r["Date"], r["duty_start"])
+        fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
+        duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
 
-    if not s or not duty_e:
-        continue
+        if not s or not duty_e:
+            continue
 
-    # --- Fix: bump FDP end forward if it looks like post-midnight ---
-    if fdp_e:
-        fdp_end = fdp_e + timedelta(minutes=15)
-        if fdp_end < s or (s.hour > 18 and fdp_end.hour < 6):
-            fdp_end += timedelta(days=1)
-        fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
+        # --- FDP end (+15min buffer, roll forward if post-midnight) ---
+        if fdp_e:
+            fdp_end = fdp_e + timedelta(minutes=15)
+            if fdp_end < s or (s.hour > 18 and fdp_end.hour < 6):
+                fdp_end += timedelta(days=1)
+            fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
 
-    # --- Fix: bump duty end forward if overnight ---
-    if duty_e < s or (s.hour > 18 and duty_e.hour < 6):
-        duty_e += timedelta(days=1)
-    fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
+        # --- Duty end (roll forward if overnight) ---
+        if duty_e < s or (s.hour > 18 and duty_e.hour < 6):
+            duty_e += timedelta(days=1)
+        fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
 
+    fdp["FDP_hrs"] = fdp["FDP_min"].apply(minutes_to_hours)
+    fdp["Duty_hrs"] = fdp["Duty_min"].apply(minutes_to_hours)
 
     # Turns
     fdp = fdp.sort_values(["Name", "Date", "duty_start", "duty_end"]).reset_index(drop=True)
@@ -180,7 +181,7 @@ for i, r in fdp.iterrows():
                 prev_end = to_dt(fdp.loc[i-1, "Date"], fdp.loc[i-1, "duty_end"])
                 cur_start = to_dt(fdp.loc[i, "Date"], fdp.loc[i, "duty_start"])
                 if prev_end and cur_start:
-                    if fdp.loc[i-1, "fdp_end"]:  # only add +15 if last duty was flown
+                    if fdp.loc[i-1, "fdp_end"]:
                         prev_end += timedelta(minutes=15)
                     if cur_start < prev_end:
                         cur_start += timedelta(days=1)
@@ -219,8 +220,10 @@ for i, r in fdp.iterrows():
 
     # ---------- UI ----------
     st.subheader("Consolidated FDPs (debug)")
-    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end", "FDP_hrs", "Duty_hrs", "Turn_hrs", "hrs7d", "hrs30d"]
-    st.dataframe(fdp[dbg_cols], use_container_width=True)
+    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end",
+                "FDP_hrs", "Duty_hrs", "Turn_hrs", "hrs7d", "hrs30d"]
+    available_cols = [c for c in dbg_cols if c in fdp.columns]
+    st.dataframe(fdp[available_cols], use_container_width=True)
 
     st.subheader("Exceedances Detected")
     if issues_df.empty:
