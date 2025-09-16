@@ -25,7 +25,6 @@ def excel_duration_to_hours(value):
         except:
             return 0.0
     elif isinstance(value, (float, int)):
-        # Excel time serial (e.g., 0.5 = 12 hours)
         return round(float(value) * 24, 2)
     elif isinstance(value, pd.Timedelta):
         return round(value.total_seconds() / 3600, 2)
@@ -36,13 +35,13 @@ def parse_ftl_excel(file):
     xl = pd.ExcelFile(file)
     frames = []
     for sheet in xl.sheet_names:
-        df = xl.parse(sheet)
+        df = xl.parse(sheet, dtype=str)
         df["Sheet"] = sheet
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
 
-    # Strip and deduplicate headers
-    stripped_cols = [c.strip() for c in df.columns]
+    # Clean column names
+    stripped_cols = [str(c).strip() for c in df.columns]
     seen = {}
     deduped_cols = []
     for col in stripped_cols:
@@ -54,8 +53,8 @@ def parse_ftl_excel(file):
             deduped_cols.append(f"{col}.{seen[col]-1}")
     df.columns = deduped_cols
 
-    # Identify time duration columns (e.g., 7d, 30d, 365d)
-    time_cols = [c for c in df.columns if re.search(r"(\d{1,3}d)", c)]
+    # Detect all potential time columns (string and Excel duration)
+    time_cols = [c for c in df.columns if re.search(r"(\d{1,3}d|\d{1,2}:\d{2}(:\d{2})?)", str(df[c].dropna().astype(str).iloc[0])) or "d" in c.lower()]
 
     for col in time_cols:
         df["hrs_" + col] = df[col].apply(excel_duration_to_hours)
@@ -68,9 +67,10 @@ if uploaded:
     with st.spinner("Parsing report..."):
         ftl = parse_ftl_excel(uploaded)
 
-    # Show converted time columns
-    debug_cols = [c for c in ftl.columns if c.startswith("hrs_")]
-    st.subheader("Parsed Time Summary (in Hours)")
-    st.dataframe(ftl[debug_cols], use_container_width=True)
+    st.subheader("Full Parsed Data")
+    st.dataframe(ftl, use_container_width=True)
 
-    # Optionally: merge with FDP/Fatigue checker logic here later
+    debug_cols = [c for c in ftl.columns if c.startswith("hrs_")]
+    if debug_cols:
+        st.subheader("Parsed Time Summary (in Hours)")
+        st.dataframe(ftl[debug_cols + ["Sheet"]], use_container_width=True)
