@@ -38,36 +38,74 @@ def to_dt(d,t): return None if pd.isna(d) or t is None else datetime.combine(d,t
 
 # ---------- FDP consolidation ----------
 def consolidate_fdps(ftl):
-    ftl=ftl.sort_values(["Name","Date_parsed","RowOrder"]).reset_index(drop=True)
-    periods=[]; cur=None
-    for _,row in ftl.iterrows():
-        name=row["Name"]; date=row["Date_parsed"]
-        sd_raw=str(row.get("Start Duty","") or ""); bo_raw=str(row.get("Blocks On","") or "")
-        start_t=row["StartDuty_t"]; end_t=row["BlocksOn_t"]
-        is_split="(split)" in sd_raw; is_rest="Rest" in bo_raw; is_new_start=start_t is not None
-        if cur is None or name!=cur["Name"]:
-            if cur is not None: periods.append(cur)
-            cur={"Name":name,"Date":date,"duty_start":start_t,"blocks_on":end_t,
-                 "hrs7d":row["hrs7d"],"hrs30d":row["hrs30d"],"split":False,
-                 "break_min":None}
+    ftl = ftl.sort_values(["Name", "Date_parsed", "RowOrder"]).reset_index(drop=True)
+    periods = []
+    cur = None
+
+    for _, row in ftl.iterrows():
+        name = row["Name"]
+        date = row["Date_parsed"]
+
+        sd_raw = str(row.get("Start Duty", "") or "")
+        bo_raw = str(row.get("Blocks On", "") or "")
+
+        start_t = row["StartDuty_t"]
+        end_t = row["BlocksOn_t"]
+
+        # ✅ Only treat (split) as split
+        is_split = "(split)" in sd_raw.lower()
+        is_new_start = start_t is not None
+
+        if cur is None or name != cur["Name"]:
+            if cur is not None:
+                periods.append(cur)
+            cur = {
+                "Name": name,
+                "Date": date,
+                "duty_start": start_t,
+                "blocks_on": end_t,
+                "hrs7d": row["hrs7d"],
+                "hrs30d": row["hrs30d"],
+                "split": False,
+                "break_min": None,
+            }
             continue
-        if is_split or is_rest or (is_new_start and cur["duty_start"] and start_t):
-            # calculate mid-day break for split
-            prev_end=to_dt(cur["Date"],cur["blocks_on"])
-            next_start=to_dt(date,start_t)
+
+        # ✅ Only trigger split when explicitly marked or a new start duty
+        if is_split or is_new_start:
+            # calculate break
+            prev_end = to_dt(cur["Date"], cur["blocks_on"])
+            next_start = to_dt(date, start_t)
             if prev_end and next_start:
-                if next_start<prev_end: next_start+=timedelta(days=1)
-                cur["break_min"]=(next_start-prev_end).total_seconds()/60.0
+                if next_start < prev_end:
+                    next_start += timedelta(days=1)
+                cur["break_min"] = (next_start - prev_end).total_seconds() / 60.0
+
             periods.append(cur)
-            cur={"Name":name,"Date":date,"duty_start":start_t,"blocks_on":end_t,
-                 "hrs7d":row["hrs7d"],"hrs30d":row["hrs30d"],"split":True,
-                 "break_min":None}
+            cur = {
+                "Name": name,
+                "Date": date,
+                "duty_start": start_t,
+                "blocks_on": end_t,
+                "hrs7d": row["hrs7d"],
+                "hrs30d": row["hrs30d"],
+                "split": is_split,
+                "break_min": None,
+            }
             continue
-        if end_t: cur["blocks_on"]=end_t
-        if pd.notna(row["hrs7d"]): cur["hrs7d"]=row["hrs7d"]
-        if pd.notna(row["hrs30d"]): cur["hrs30d"]=row["hrs30d"]
-    if cur is not None: periods.append(cur)
+
+        if end_t:
+            cur["blocks_on"] = end_t
+        if pd.notna(row["hrs7d"]):
+            cur["hrs7d"] = row["hrs7d"]
+        if pd.notna(row["hrs30d"]):
+            cur["hrs30d"] = row["hrs30d"]
+
+    if cur is not None:
+        periods.append(cur)
+
     return pd.DataFrame(periods)
+
 
 # ---------- File upload ----------
 uploaded=st.file_uploader("Upload FL3XX FTL CSV",type=["csv"])
