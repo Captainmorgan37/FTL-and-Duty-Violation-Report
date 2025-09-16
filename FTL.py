@@ -1,5 +1,11 @@
+import re
+import math
+import streamlit as st
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime, timedelta, time
+
+st.set_page_config(page_title="FTL/FRMS Checker", layout="wide")
+st.title("AirSprint FRMS & FTL Duty Checker")
 
 # ---------- Helpers ----------
 def excel_time_to_time(val):
@@ -49,19 +55,24 @@ def excel_time_to_hours(val):
     except:
         return None
 
+def to_dt(d, t):
+    return None if pd.isna(d) or t is None else datetime.combine(d, t)
+
 # ---------- Parser ----------
-def parse_ftl_excel(path, sheet="Sheet1"):
-    df = pd.read_excel(path, sheet_name=sheet)
+def parse_ftl_excel(file, sheet=0):
+    df = pd.read_excel(file, sheet_name=sheet)
 
     # Forward-fill pilot name
     if "Name" in df.columns:
         df["Name"] = df["Name"].ffill()
 
-    # Parse date column (dd.mm.yyyy format)
+    # Parse date column
     if "Date" in df.columns:
-        df["Date_parsed"] = pd.to_datetime(df["Date"], format="%d.%m.%Y", errors="coerce").dt.date
+        df["Date_parsed"] = pd.to_datetime(
+            df["Date"], format="%d.%m.%Y", errors="coerce"
+        ).dt.date
 
-    # Auto-detect time-like columns
+    # Auto-detect time-of-day columns
     time_like_cols = []
     for col in df.columns:
         if col in ["Date", "Name"]:
@@ -82,3 +93,111 @@ def parse_ftl_excel(path, sheet="Sheet1"):
         df["hrs_" + col] = df[col].apply(excel_time_to_hours)
 
     return df
+
+# ---------- FDP consolidation ----------
+def consolidate_fdps(ftl):
+    ftl = ftl.sort_values(["Name", "Date_parsed"]).reset_index(drop=True)
+    periods = []
+    cur = None
+
+    for _, row in ftl.iterrows():
+        name = row["Name"]
+        date = row["Date_parsed"]
+        start_t = row.get("Start Duty_t")
+        end_t = row.get("Blocks On_t")
+
+        duty_raw = str(row.get("Duty", "") or "")
+        reason_raw = str(row.get("Reason", "") or "")
+        is_positioning = duty_raw.strip().startswith("P ")
+        is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
+        is_rest = "rest" in reason_raw.lower()
+
+        this_date = date if pd.notna(date) else (cur["Date"] if cur else None)
+
+        # Reset rows
+        if is_rest or is_positioning or is_sim_evt or (pd.notna(date) and start_t is None and end_t is None):
+            if cur is not None:
+                periods.append(cur)
+            periods.append({
+                "Name": name,
+                "Date": this_date,
+                "duty_start": None,
+                "fdp_end": None,
+                "duty_end": None,
+                "hrs7d": row.get("hrs_7d"),
+                "hrs30d": row.get("hrs_30d"),
+            })
+            cur = None
+            continue
+
+        # New pilot or first duty
+        if cur is None or name != cur["Name"]:
+            if cur is not None:
+                periods.append(cur)
+            cur = {
+                "Name": name,
+                "Date": this_date,
+                "duty_start": start_t,
+                "fdp_end": end_t,
+                "duty_end": end_t,
+                "hrs7d": row.get("hrs_7d"),
+                "hrs30d": row.get("hrs_30d"),
+            }
+            continue
+
+        # Extend current duty
+        if end_t:
+            cur["duty_end"] = end_t
+            cur["fdp_end"] = end_t
+
+        if pd.notna(row.get("hrs_7d")):
+            cur["hrs7d"] = row["hrs_7d"]
+        if pd.notna(row.get("hrs_30d")):
+            cur["hrs30d"] = row["hrs_30d"]
+
+        if this_date:
+            cur["Date"] = this_date
+
+    if cur is not None:
+        periods.append(cur)
+
+    return pd.DataFrame(periods)
+
+# ---------- File upload ----------
+uploaded = st.file_uploader("Upload FTL Excel Report", type=["xlsx"])
+
+if uploaded:
+    ftl = parse_ftl_excel(uploaded)
+    st.subheader("Parsed Data (debug)")
+    st.dataframe(ftl.head(30), use_container_width=True)
+
+    fdp = consolidate_fdps(ftl)
+
+    # FDP + Duty mins
+    fdp["FDP_min"] = None
+    fdp["Duty_min"] = None
+
+    for i, r in fdp.iterrows():
+        s = to_dt(r["Date"], r["duty_start"])
+        fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
+        duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
+
+        if not s or not duty_e:
+            continue
+
+        if fdp_e:
+            fdp_end = fdp_e + timedelta(minutes=15)
+            if fdp_end < s or (s.hour > 18 and fdp_end.hour < 6):
+                fdp_end += timedelta(days=1)
+            fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
+
+        if duty_e < s or (s.hour > 18 and duty_e.hour < 6):
+            duty_e += timedelta(days=1)
+        fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
+
+    fdp["FDP_hrs"] = fdp["FDP_min"].apply(lambda x: round(x/60, 2) if x else None)
+    fdp["Duty_hrs"] = fdp["Duty_min"].apply(lambda x: round(x/60, 2) if x else None)
+
+    st.subheader("Consolidated FDPs (debug)")
+    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end", "FDP_hrs", "Duty_hrs", "hrs7d", "hrs30d"]
+    st.dataframe(fdp[dbg_cols], use_container_width=True)
