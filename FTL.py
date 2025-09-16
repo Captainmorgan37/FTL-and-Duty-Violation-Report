@@ -24,7 +24,7 @@ def excel_time_to_time(val):
     s = str(val).strip()
     if ":" in s:
         try:
-            parts = [int(x) for x in s.split(":")]
+            parts = [int(x) for x in s.split(":") if x.strip() != ""]
             while len(parts) < 3:
                 parts.append(0)
             return time(parts[0], parts[1], parts[2])
@@ -96,13 +96,18 @@ def excel_time_to_hours(val):
     except:
         return None
 
-
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
 
 # ---------- Parser ----------
 def parse_ftl_excel(file, sheet=0):
     df = pd.read_excel(file, sheet_name=sheet, engine="openpyxl")
+
+    # Strip whitespace from column names
+    df.columns = df.columns.str.strip()
+
+    # Remove exact duplicate columns
+    df = df.loc[:, ~df.columns.duplicated()]
 
     # Forward-fill pilot name
     if "Name" in df.columns:
@@ -127,17 +132,22 @@ def parse_ftl_excel(file, sheet=0):
                 time_like_cols.append(col)
 
     for col in time_like_cols:
-        df[col + "_t"] = df[col].apply(excel_time_to_time)
+        newcol = col + "_t"
+        if newcol not in df.columns:  # avoid duplicate suffix
+            df[newcol] = df[col].apply(excel_time_to_time)
 
     # Auto-detect rolling/duration columns
     duration_keys = ["7d", "28d", "30d", "90d", "180d", "365d"]
     duration_cols = [c for c in df.columns if any(key in c.lower() for key in duration_keys)]
     duration_cols += [c for c in df.columns if pd.api.types.is_timedelta64_ns_dtype(df[c])]
+
     seen = set()
     duration_cols = [c for c in duration_cols if not (c in seen or seen.add(c))]
 
     for col in duration_cols:
-        df["hrs_" + col] = df[col].apply(excel_time_to_hours)
+        newcol = "hrs_" + col
+        if newcol not in df.columns:  # avoid duplicate suffix
+            df[newcol] = df[col].apply(excel_time_to_hours)
 
     return df
 
@@ -226,8 +236,8 @@ if uploaded:
 
     # Debug view: only show parsed versions (_t and hrs_)
     debug_cols = ["Name", "Date", "Date_parsed"]
-    debug_cols += [c for c in ftl.columns if c.endswith("_t")]       # parsed times
-    debug_cols += [c for c in ftl.columns if c.startswith("hrs_")]   # parsed hours
+    debug_cols += [c for c in ftl.columns if c.endswith("_t")]
+    debug_cols += [c for c in ftl.columns if c.startswith("hrs_")]
     st.subheader("Parsed Data (debug)")
     st.dataframe(ftl[debug_cols].head(30), use_container_width=True)
 
