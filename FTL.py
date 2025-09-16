@@ -36,19 +36,12 @@ def excel_time_to_hours(val):
     """Convert Excel-style hh:mm:ss, Timedelta, or day+time into float hours"""
     if pd.isna(val):
         return None
-
-    # Case 1: Excel Timestamp (1900 anchor date)
     if isinstance(val, pd.Timestamp):
         return val.hour + val.minute/60 + val.second/3600
-
-    # Case 2: Timedelta (e.g., '7 days 08:20:00')
     if isinstance(val, pd.Timedelta):
         return val.total_seconds() / 3600.0
-
-    # Case 3: String
     s = str(val).strip().lower()
     if "day" in s:
-        # e.g., "7 days 08:20:00" or "2 days"
         parts = s.replace("days", "").replace("day", "").strip().split()
         days = int(parts[0])
         hh, mm, ss = 0, 0, 0
@@ -58,7 +51,6 @@ def excel_time_to_hours(val):
                 tparts.append(0)
             hh, mm, ss = tparts
         return days*24 + hh + mm/60 + ss/3600
-
     if ":" in s:
         try:
             parts = [int(x) for x in s.split(":")]
@@ -68,19 +60,17 @@ def excel_time_to_hours(val):
             return hh + mm/60 + ss/3600
         except:
             return None
-
     try:
         return float(s)
     except:
         return None
-
 
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
 
 # ---------- Parser ----------
 def parse_ftl_excel(file, sheet=0):
-    df = pd.read_excel(file, sheet_name=sheet)
+    df = pd.read_excel(file, sheet_name=sheet, engine="openpyxl")
 
     # Forward-fill pilot name
     if "Name" in df.columns:
@@ -146,6 +136,7 @@ def consolidate_fdps(ftl):
                 "duty_end": None,
                 "hrs7d": row.get("hrs_7d"),
                 "hrs30d": row.get("hrs_30d"),
+                "hrs365d": row.get("hrs_365d"),
             })
             cur = None
             continue
@@ -162,6 +153,7 @@ def consolidate_fdps(ftl):
                 "duty_end": end_t,
                 "hrs7d": row.get("hrs_7d"),
                 "hrs30d": row.get("hrs_30d"),
+                "hrs365d": row.get("hrs_365d"),
             }
             continue
 
@@ -174,6 +166,8 @@ def consolidate_fdps(ftl):
             cur["hrs7d"] = row["hrs_7d"]
         if pd.notna(row.get("hrs_30d")):
             cur["hrs30d"] = row["hrs_30d"]
+        if pd.notna(row.get("hrs_365d")):
+            cur["hrs365d"] = row["hrs_365d"]
 
         if this_date:
             cur["Date"] = this_date
@@ -184,12 +178,16 @@ def consolidate_fdps(ftl):
     return pd.DataFrame(periods)
 
 # ---------- File upload ----------
-uploaded = st.file_uploader("Upload FTL Excel Report", type=["xlsx"])
+uploaded = st.file_uploader("Upload FTL Excel Report", type=["xlsx", "csv"])
 
 if uploaded:
     ftl = parse_ftl_excel(uploaded)
+    
+    # Debug view: only show parsed versions (_t and hrs_)
+    debug_cols = ["Name", "Date", "Date_parsed"] + \
+                 [c for c in ftl.columns if c.endswith("_t") or c.startswith("hrs_")]
     st.subheader("Parsed Data (debug)")
-    st.dataframe(ftl.head(30), use_container_width=True)
+    st.dataframe(ftl[debug_cols].head(30), use_container_width=True)
 
     fdp = consolidate_fdps(ftl)
 
@@ -219,5 +217,6 @@ if uploaded:
     fdp["Duty_hrs"] = fdp["Duty_min"].apply(lambda x: round(x/60, 2) if x else None)
 
     st.subheader("Consolidated FDPs (debug)")
-    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end", "FDP_hrs", "Duty_hrs", "hrs7d", "hrs30d"]
+    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end", 
+                "FDP_hrs", "Duty_hrs", "hrs7d", "hrs30d", "hrs365d"]
     st.dataframe(fdp[dbg_cols], use_container_width=True)
