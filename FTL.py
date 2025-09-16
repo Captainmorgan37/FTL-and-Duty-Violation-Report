@@ -331,16 +331,15 @@ with tab_policy:
         dv = try_read_csv(dv_file)
         meta = infer_policy_columns(dv.copy())
 
-        # Column mapping expander
+        # Column mapping expander — hide Rest Before columns
         with st.expander("Column mapping (detected from CSV headers)"):
-            mapping_view = {k: v for k, v in meta.items() if k not in ("all_cols",)}
+            mapping_view = {k: v for k, v in meta.items() 
+                            if k not in ("all_cols", "rest_before_act", "rest_before_min")}
             st.write(mapping_view)
-            if meta["rest_before_act"] and meta["rest_after_act"] and meta["rest_before_act"] == meta["rest_after_act"]:
-                st.warning("Detected that 'Rest Before (act)' and 'Rest After (act)' resolved to the **same column**. Detector will try to keep them distinct.")
 
         pilot_col = meta["pilot_col"]; c7 = meta["c7"]; c30 = meta["c30"]
         rest_after_act = meta["rest_after_act"]; rest_after_min = meta["rest_after_min"]
-        # We still detect RestBefore_* but won't render its table per your request
+        # Detected but hidden from mapping view:
         rest_before_act = meta["rest_before_act"]; rest_before_min = meta["rest_before_min"]
         fdp_act = meta["fdp_act"]; fdp_max = meta["fdp_max"]; date_col = meta["date_col"]
 
@@ -451,8 +450,6 @@ with tab_policy:
                 to_csv_download(v_after, "Violation_RestAfter_act_lt_min.csv", key="dl_rest_after")
             else:
                 st.info("Rest After FDP (min) column not found; skipping that check.")
-
-            # (REMOVED) Rest Before vs Min table per your request
 
             # FDP act vs max (KEEP)
             if "FDP_act" in work.columns and "FDP_max" in work.columns:
