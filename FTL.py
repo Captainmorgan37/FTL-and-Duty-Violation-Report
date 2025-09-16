@@ -12,7 +12,11 @@ st.markdown(
     "Upload the relevant CSV exports and the app will run three locked checks:"
     "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
     "\n2) **Short Rest**: ≥2 consecutive days with **rest < 11 hours** _(FTL CSV)_"
-    "\n3) **7d/30d Policy**: Company 7-day/30-day flight-time screen with **Rest After FDP (act)** ≥ 11 h _(Duty Violation CSV)_"
+    "\n3) **7d/30d Policy + Detailed Duty Violations** _(Duty Violation CSV)_"
+    "\n   - 7-day/30-day totals with Rest After FDP (act) ≥ 11 h requirement"
+    "\n   - Rest After FDP (act) < Rest After FDP (min)"
+    "\n   - Rest Before FDP (act) < Rest Before FDP (min)"
+    "\n   - Flight Duty Period (act) > Flight Duty Period (max)"
 )
 
 # -----------------------------
@@ -139,10 +143,13 @@ def infer_policy_columns(dv_df):
         c30_candidates = [c for c in cols if re.search(r"(30d|past.?30).*(flight|block|time)", c, re.I)]
     c7 = c7_candidates[0] if c7_candidates else None
     c30 = c30_candidates[0] if c30_candidates else None
-    rest_candidates = [c for c in cols if re.search(r"Rest\s*After\s*FDP.*\(act\)", c, re.I)]
-    if not rest_candidates:
-        rest_candidates = [c for c in cols if re.search(r"Rest.*FDP.*act", c, re.I)]
-    rest_col = rest_candidates[0] if rest_candidates else None
+    rest_after_act = next((c for c in cols if re.search(r"Rest\s*After\s*FDP.*\(act\)", c, re.I)), None)
+    rest_after_min = next((c for c in cols if re.search(r"Rest\s*After\s*FDP.*\(min\)", c, re.I)), None)
+    rest_before_act = next((c for c in cols if re.search(r"Rest\s*Before\s*FDP.*\(act\)", c, re.I)), None)
+    rest_before_min = next((c for c in cols if re.search(r"Rest\s*Before\s*FDP.*\(min\)", c, re.I)), None)
+    fdp_act = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(act\)|\bFDP\b.*\(act\)", c, re.I)), None)
+    fdp_max = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(max\)|\bFDP\b.*\(max\)", c, re.I)), None)
+
     # optional date
     date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
     date_col = None
@@ -151,7 +158,7 @@ def infer_policy_columns(dv_df):
         if parsed.notna().mean() > 0.5:
             date_col = c
             break
-    return pilot_col, c7, c30, rest_col, date_col
+    return pilot_col, c7, c30, rest_after_act, rest_after_min, rest_before_act, rest_before_min, fdp_act, fdp_max, date_col
 
 # ---------- Builders & streak logic ----------
 def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0):
@@ -229,7 +236,7 @@ def to_csv_download(df, filename, key=None):
 # -----------------------------
 st.sidebar.header("Uploads")
 ftl_file = st.sidebar.file_uploader("FTL CSV (for Duty & Short Rest checks)", type=["csv"], key="ftl_csv")
-dv_file = st.sidebar.file_uploader("Duty Violation CSV (for 7d/30d Policy)", type=["csv"], key="dv_csv")
+dv_file = st.sidebar.file_uploader("Duty Violation CSV (for 7d/30d Policy + detailed checks)", type=["csv"], key="dv_csv")
 
 # -----------------------------
 # Tabs
@@ -294,40 +301,64 @@ with tab_results:
 
 with tab_policy:
     if dv_file is None:
-        st.info("Upload the **Duty Violation CSV** in the sidebar to run the 7d/30d policy screen.")
+        st.info("Upload the **Duty Violation CSV** in the sidebar to run the 7d/30d policy screen and detailed checks.")
     else:
         dv = try_read_csv(dv_file)
-        pilot_col, c7, c30, rest_col, date_col = infer_policy_columns(dv.copy())
+        (pilot_col, c7, c30, rest_after_act, rest_after_min,
+         rest_before_act, rest_before_min, fdp_act, fdp_max, date_col) = infer_policy_columns(dv.copy())
 
-        if not (pilot_col and c7 and c30 and rest_col):
-            st.error("Could not identify one or more required columns in Duty Violation CSV (Pilot, 7d, 30d, Rest After FDP (act)).")
-            st.write("Columns:", list(dv.columns)[:70])
+        if not (pilot_col and c7 and c30 and rest_after_act):
+            st.error("Required columns missing in Duty Violation CSV (need: Pilot, 7d, 30d, Rest After FDP (act) at minimum).")
+            st.write("Columns:", list(dv.columns)[:80])
         else:
             dv[pilot_col] = dv[pilot_col].ffill()
-            cols = [pilot_col, c7, c30, rest_col] + ([date_col] if date_col else [])
+            cols = [pilot_col, c7, c30, rest_after_act] + \
+                   ([rest_after_min] if rest_after_min else []) + \
+                   ([rest_before_act] if rest_before_act else []) + \
+                   ([rest_before_min] if rest_before_min else []) + \
+                   ([fdp_act] if fdp_act else []) + \
+                   ([fdp_max] if fdp_max else []) + \
+                   ([date_col] if date_col else [])
             work = dv[cols].copy()
-            new_cols = ["Pilot", "Hours7dRaw", "Hours30dRaw", "RestRaw"] + (["Date"] if date_col else [])
+            new_cols = ["Pilot", "Hours7dRaw", "Hours30dRaw", "RestAfter_actRaw"]
+            if rest_after_min: new_cols.append("RestAfter_minRaw")
+            if rest_before_act: new_cols.append("RestBefore_actRaw")
+            if rest_before_min: new_cols.append("RestBefore_minRaw")
+            if fdp_act: new_cols.append("FDP_actRaw")
+            if fdp_max: new_cols.append("FDP_maxRaw")
+            if date_col: new_cols.append("Date")
             work.columns = new_cols
 
+            # Parse
             work["Hours7d"] = work["Hours7dRaw"].map(parse_duration_to_hours)
             work["Hours30d"] = work["Hours30dRaw"].map(parse_duration_to_hours)
-            work["RestHrs"] = work["RestRaw"].map(parse_duration_to_hours)
-            if date_col:
+            work["RestAfter_act"] = work["RestAfter_actRaw"].map(parse_duration_to_hours)
+            if "RestAfter_minRaw" in work.columns: work["RestAfter_min"] = work["RestAfter_minRaw"].map(parse_duration_to_hours)
+            if "RestBefore_actRaw" in work.columns: work["RestBefore_act"] = work["RestBefore_actRaw"].map(parse_duration_to_hours)
+            if "RestBefore_minRaw" in work.columns: work["RestBefore_min"] = work["RestBefore_minRaw"].map(parse_duration_to_hours)
+            if "FDP_actRaw" in work.columns: work["FDP_act"] = work["FDP_actRaw"].map(parse_duration_to_hours)
+            if "FDP_maxRaw" in work.columns: work["FDP_max"] = work["FDP_maxRaw"].map(parse_duration_to_hours)
+            if "Date" in work.columns:
                 work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
 
-            # Clean
-            work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestHrs"])
+            work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestAfter_act"])
 
-            # Aggregate most conservative per date (min rest) and max rolling totals
-            group_keys = ["Pilot"] + (["Date"] if date_col else [])
-            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestHrs": "min"}
+            # Aggregate conservative per date (min rest) and max rolling totals
+            group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
+            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestAfter_act": "min"}
+            if "RestAfter_min" in work.columns: aggdict["RestAfter_min"] = "min"
+            if "RestBefore_act" in work.columns: aggdict["RestBefore_act"] = "min"
+            if "RestBefore_min" in work.columns: aggdict["RestBefore_min"] = "min"
+            if "FDP_act" in work.columns: aggdict["FDP_act"] = "max"
+            if "FDP_max" in work.columns: aggdict["FDP_max"] = "max"
+
             work = work.sort_values(group_keys).groupby(group_keys, as_index=False).agg(aggdict)
 
-            # Policy
+            # 7d/30d policy with turn-time
             work["Over40in7d"] = work["Hours7d"] > 40.0
             work["Under48_7d"] = work["Hours7d"] < 48.0
             work["Under70_30d"] = work["Hours30d"] < 70.0
-            work["ShortTurn"] = work["RestHrs"] < 11.0
+            work["ShortTurn"] = work["RestAfter_act"] < 11.0
 
             def classify(row):
                 if not row["Over40in7d"]:
@@ -340,18 +371,18 @@ with tab_policy:
 
             work["PolicyStatus"] = work.apply(classify, axis=1)
 
-            # Banners
+            # Primary policy banners
             not_allowed = work[work["PolicyStatus"].str.contains("Not Allowed", na=False)]
             exception_fail = work[work["PolicyStatus"].str.contains("FAIL", na=False)]
             exception_pass = work[work["PolicyStatus"].str.contains("PASS", na=False)]
 
             if not not_allowed.empty or not exception_fail.empty:
                 bad_pilots = sorted(set(not_allowed["Pilot"].tolist() + exception_fail["Pilot"].tolist()))
-                st.error(f"⚠️ Policy VIOLATIONS detected: {len(bad_pilots)} pilot(s): {', '.join(bad_pilots)}")
+                st.error(f"⚠️ 7d/30d Policy VIOLATIONS: {len(bad_pilots)} pilot(s): {', '.join(bad_pilots)}")
             else:
-                st.success("✅ No 'Not Allowed' or 'Exception FAIL' rows detected.")
+                st.success("✅ 7d/30d policy clean (no 'Not Allowed' or 'Exception FAIL').")
 
-            # Tables
+            # Tables + downloads
             st.markdown("**Not Allowed (≥48 in 7d or ≥70 in 30d)**")
             st.dataframe(not_allowed, use_container_width=True)
             to_csv_download(not_allowed, "DutyViolation_not_allowed_ge48_7d_or_ge70_30d.csv", key="dl_na")
@@ -364,8 +395,55 @@ with tab_policy:
             st.dataframe(exception_pass, use_container_width=True)
             to_csv_download(exception_pass, "DutyViolation_over40_exception_PASS_rest_ge11.csv", key="dl_pass")
 
+            # ---- Additional detailed violation checks ----
+            st.markdown("---")
+            st.subheader("Additional Duty Violations (from Duty Violation CSV)")
+
+            # Rest After vs Min
+            if "RestAfter_min" in work.columns:
+                v_after = work.dropna(subset=["RestAfter_act", "RestAfter_min"]).copy()
+                v_after = v_after[v_after["RestAfter_act"] < v_after["RestAfter_min"]]
+                if not v_after.empty:
+                    st.error(f"⚠️ Rest After FDP violations: {len(v_after)} row(s) where act < min")
+                else:
+                    st.success("✅ No Rest After FDP (act < min) violations found.")
+                st.markdown("**Rest After FDP (act) < Rest After FDP (min)**")
+                st.dataframe(v_after, use_container_width=True)
+                to_csv_download(v_after, "Violation_RestAfter_act_lt_min.csv", key="dl_rest_after")
+
+            else:
+                st.info("Rest After FDP (min) column not found; skipping that check.")
+
+            # Rest Before vs Min
+            if "RestBefore_act" in work.columns and "RestBefore_min" in work.columns:
+                v_before = work.dropna(subset=["RestBefore_act", "RestBefore_min"]).copy()
+                v_before = v_before[v_before["RestBefore_act"] < v_before["RestBefore_min"]]
+                if not v_before.empty:
+                    st.error(f"⚠️ Rest Before FDP violations: {len(v_before)} row(s) where act < min")
+                else:
+                    st.success("✅ No Rest Before FDP (act < min) violations found.")
+                st.markdown("**Rest Before FDP (act) < Rest Before FDP (min)**")
+                st.dataframe(v_before, use_container_width=True)
+                to_csv_download(v_before, "Violation_RestBefore_act_lt_min.csv", key="dl_rest_before")
+            else:
+                st.info("Rest Before FDP (act/min) columns not found; skipping that check.")
+
+            # FDP act vs max
+            if "FDP_act" in work.columns and "FDP_max" in work.columns:
+                v_fdp = work.dropna(subset=["FDP_act", "FDP_max"]).copy()
+                v_fdp = v_fdp[v_fdp["FDP_act"] > v_fdp["FDP_max"]]
+                if not v_fdp.empty:
+                    st.error(f"⚠️ FDP Max violations: {len(v_fdp)} row(s) where act > max")
+                else:
+                    st.success("✅ No FDP act > max violations found.")
+                st.markdown("**Flight Duty Period (act) > Flight Duty Period (max)**")
+                st.dataframe(v_fdp, use_container_width=True)
+                to_csv_download(v_fdp, "Violation_FDP_act_gt_max.csv", key="dl_fdp")
+            else:
+                st.info("FDP (act/max) columns not found; skipping that check.")
+
             # Full export
-            to_csv_download(work, "DutyViolation_with_Rest_policy_screen.csv", key="dl_all")
+            to_csv_download(work, "DutyViolation_with_Rest_and_DetailedChecks.csv", key="dl_all")
 
 with tab_debug:
-    st.caption("Diagnostics and raw/normalized tables are shown in prior versions; if you need them here too, I can add coverage views.")
+    st.caption("If you want coverage/normalized tables in this version's Debug tab, I can add them.")
