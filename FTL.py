@@ -340,6 +340,7 @@ with tab_policy:
 
         pilot_col = meta["pilot_col"]; c7 = meta["c7"]; c30 = meta["c30"]
         rest_after_act = meta["rest_after_act"]; rest_after_min = meta["rest_after_min"]
+        # We still detect RestBefore_* but won't render its table per your request
         rest_before_act = meta["rest_before_act"]; rest_before_min = meta["rest_before_min"]
         fdp_act = meta["fdp_act"]; fdp_max = meta["fdp_max"]; date_col = meta["date_col"]
 
@@ -437,7 +438,7 @@ with tab_policy:
             st.markdown("---")
             st.subheader("Additional Duty Violations")
 
-            # Rest After vs Min
+            # Rest After vs Min (KEEP)
             if "RestAfter_min" in work.columns:
                 v_after = work.dropna(subset=["RestAfter_act", "RestAfter_min"]).copy()
                 v_after = v_after[v_after["RestAfter_act"] < v_after["RestAfter_min"]]
@@ -451,21 +452,9 @@ with tab_policy:
             else:
                 st.info("Rest After FDP (min) column not found; skipping that check.")
 
-            # Rest Before vs Min
-            if "RestBefore_act" in work.columns and "RestBefore_min" in work.columns:
-                v_before = work.dropna(subset=["RestBefore_act", "RestBefore_min"]).copy()
-                v_before = v_before[v_before["RestBefore_act"] < v_before["RestBefore_min"]]
-                if not v_before.empty:
-                    st.error(f"⚠️ Rest Before FDP violations: {len(v_before)} row(s) (act < min)")
-                else:
-                    st.success("✅ No Rest Before FDP (act < min) violations found.")
-                st.markdown("**Rest Before FDP (act) < Rest Before FDP (min)**")
-                st.dataframe(v_before, use_container_width=True)
-                to_csv_download(v_before, "Violation_RestBefore_act_lt_min.csv", key="dl_rest_before")
-            else:
-                st.info("Rest Before FDP (act/min) columns not found; skipping that check.")
+            # (REMOVED) Rest Before vs Min table per your request
 
-            # FDP act vs max
+            # FDP act vs max (KEEP)
             if "FDP_act" in work.columns and "FDP_max" in work.columns:
                 v_fdp = work.dropna(subset=["FDP_act", "FDP_max"]).copy()
                 v_fdp = v_fdp[v_fdp["FDP_act"] > v_fdp["FDP_max"]]
