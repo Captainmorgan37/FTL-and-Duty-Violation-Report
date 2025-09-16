@@ -41,6 +41,25 @@ def minutes_to_hours(mins):
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
 
+def parse_date_cell(val):
+    """Parse dates like '12.08.2025' (dd.mm.yyyy) or other strings reliably."""
+    if pd.isna(val): 
+        return pd.NaT
+    s = str(val).strip()
+    if not s:
+        return pd.NaT
+    # Exact dd.mm.yyyy (with leading zeros) — most FL3XX exports look like this
+    try:
+        if "." in s:
+            return datetime.strptime(s, "%d.%m.%Y").date()
+    except:
+        pass
+    # Fallback: let pandas parse but prefer dayfirst semantics
+    try:
+        return pd.to_datetime(s, dayfirst=True, errors="raise").date()
+    except:
+        return pd.NaT
+
 # ---------- FDP consolidation ----------
 def consolidate_fdps(ftl):
     ftl = ftl.sort_values(["Name", "Date_parsed", "RowOrder"]).reset_index(drop=True)
@@ -49,7 +68,9 @@ def consolidate_fdps(ftl):
 
     for _, row in ftl.iterrows():
         name = row["Name"]
+        # Always have a date: current row if present else carry from cur
         date = row["Date_parsed"]
+        this_date = date if not pd.isna(date) else (cur["Date"] if cur else None)
 
         sd_raw = str(row.get("Start Duty", "") or "")
         duty_raw = str(row.get("Duty", "") or "")
@@ -64,17 +85,14 @@ def consolidate_fdps(ftl):
         is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
         is_rest = "rest" in reason_raw.lower()
 
-        # --- If explicit rest: close out current duty ---
+        # Explicit Rest row: close out and reset (rest day should not merge chains)
         if is_rest:
             if cur is not None:
                 periods.append(cur)
             cur = None
             continue
 
-        # --- Always ensure we have a date ---
-        this_date = date if pd.notna(date) else (cur["Date"] if cur else None)
-
-        # --- New crew or first record ---
+        # New crew (or first record)
         if cur is None or name != cur["Name"]:
             if cur is not None:
                 periods.append(cur)
@@ -91,7 +109,7 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # --- Split duty or new FDP start ---
+        # Split duty marker or a new real start of FDP
         if is_split or is_new_start:
             periods.append(cur)
             cur = {
@@ -107,7 +125,7 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # --- Update current duty period ---
+        # Continue current duty period
         if end_t:
             cur["duty_end"] = end_t
             if not (is_positioning or is_sim_evt):
@@ -135,19 +153,25 @@ if uploaded:
     except:
         ftl = pd.read_csv(uploaded)
 
+    # Carry pilot name through blank cells
     ftl["Name"] = ftl["Name"].ffill()
     ftl["RowOrder"] = range(len(ftl))
-    ftl["Date_parsed"] = pd.to_datetime(ftl["Date"], errors="coerce").dt.date
 
+    # Robust date parsing + per-pilot forward-fill
+    ftl["Date_parsed"] = ftl["Date"].apply(parse_date_cell)
+    ftl["Date_parsed"] = ftl.groupby("Name")["Date_parsed"].ffill()
+
+    # Times
     ftl["StartDuty_t"] = ftl["Start Duty"].apply(parse_hhmm_from_text)
     ftl["BlocksOn_t"] = ftl["Blocks On"].apply(parse_hhmm_from_text)
 
+    # Rolling hours (converted to hours float)
     ftl["hrs7d"] = ftl["7d"].apply(duration_to_minutes).apply(minutes_to_hours) if "7d" in ftl.columns else pd.NA
     ftl["hrs30d"] = ftl["30d"].apply(duration_to_minutes).apply(minutes_to_hours) if "30d" in ftl.columns else pd.NA
 
     fdp = consolidate_fdps(ftl)
 
-    # FDP + Duty length
+    # FDP + Duty minutes
     fdp["FDP_min"] = None
     fdp["Duty_min"] = None
 
@@ -159,14 +183,15 @@ if uploaded:
         if not s or not duty_e:
             continue
 
-        # --- FDP end (+15min buffer, roll forward if post-midnight) ---
+        # FDP end (+15 min) with post-midnight roll
         if fdp_e:
             fdp_end = fdp_e + timedelta(minutes=15)
+            # If end looks like after midnight relative to a late start, roll forward one day
             if fdp_end < s or (s.hour > 18 and fdp_end.hour < 6):
                 fdp_end += timedelta(days=1)
             fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
 
-        # --- Duty end (roll forward if overnight) ---
+        # Duty end with post-midnight roll
         if duty_e < s or (s.hour > 18 and duty_e.hour < 6):
             duty_e += timedelta(days=1)
         fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
