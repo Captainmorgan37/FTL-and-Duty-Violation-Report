@@ -8,6 +8,19 @@ st.set_page_config(page_title="FTL/FRMS Checker", layout="wide")
 st.title("AirSprint FRMS & FTL Duty Checker")
 
 # ---------- Helpers ----------
+def make_unique_columns(columns):
+    """Ensure DataFrame column names are unique by appending suffixes if needed"""
+    seen = {}
+    result = []
+    for col in columns:
+        if col not in seen:
+            seen[col] = 0
+            result.append(col)
+        else:
+            seen[col] += 1
+            result.append(f"{col}_{seen[col]}")
+    return result
+
 def excel_time_to_time(val):
     """Convert Excel-style hh:mm:ss into datetime.time"""
     if pd.isna(val):
@@ -148,6 +161,9 @@ def parse_ftl_excel(file, sheet=0):
         newcol = "hrs_" + col
         if newcol not in df.columns:  # avoid duplicate suffix
             df[newcol] = df[col].apply(excel_time_to_hours)
+
+    # Final safeguard: ensure unique column names
+    df.columns = make_unique_columns(df.columns)
 
     return df
 
