@@ -3,15 +3,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-from io import StringIO, BytesIO
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL: 12+ Hour Duty Streak Checker", layout="wide")
-st.title("FTL: 12+ Hour Duty Streak Checker")
+st.set_page_config(page_title="FTL: Locked 12+ Hour Duty Streak Checker", layout="wide")
+st.title("FTL: Locked 12+ Hour Duty Streak Checker")
 
 st.markdown(
     "Upload the FL3XX **Flight Time Limitations (FTL)** CSV export. "
-    "This app will detect **2-day** and **3-day** consecutive streaks of **12+ hour duty days** per pilot."
+    "This runs a fixed check for **2-day** and **3-day** consecutive streaks of **12+ hour duty days** per pilot."
 )
 
 # -----------------------------
@@ -54,7 +53,6 @@ def parse_duration_to_hours(val):
         return np.nan
 
 def try_read_csv(uploaded_file):
-    # Try flexible sep detection; fall back to semicolon
     try:
         return pd.read_csv(uploaded_file, sep=None, engine="python", encoding="utf-8")
     except Exception:
@@ -81,7 +79,7 @@ def infer_columns(df):
     seen = set(); duty_candidates = [x for x in duty_candidates if not (x in seen or seen.add(x))]
     duty_col = None; best_rate = -1.0
     for c in duty_candidates:
-        sample = df[c].astype(str).head(100).tolist()
+        sample = df[c].astype(str).head(200).tolist()
         parsed = [parse_duration_to_hours(x) for x in sample]
         rate = np.mean([not pd.isna(x) for x in parsed])
         if rate > best_rate and rate > 0.3:
@@ -89,7 +87,7 @@ def infer_columns(df):
 
     if duty_col is None:
         for c in cols:
-            sample = df[c].astype(str).head(200).tolist()
+            sample = df[c].astype(str).head(400).tolist()
             parsed = [parse_duration_to_hours(x) for x in sample]
             rate = np.mean([not pd.isna(x) for x in parsed])
             plausible = [x for x in parsed if not pd.isna(x) and 1.0 <= x <= 18.0]
@@ -98,19 +96,16 @@ def infer_columns(df):
 
     return pilot_col, date_col, duty_col
 
-def build_work_table(df, pilot_col, date_col, duty_col, dayfirst=True, min_hours=12.0):
+def build_work_table(df, pilot_col, date_col, duty_col, min_hours=12.0):
     # Forward-fill pilot names through blank rows in their block
     df[pilot_col] = df[pilot_col].ffill()
 
     work = df[[pilot_col, date_col, duty_col]].copy()
     work.columns = ["Pilot", "Date", "DutyRaw"]
-    work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=dayfirst)
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
     work["DutyHours"] = work["DutyRaw"].map(parse_duration_to_hours)
 
-    # Keep rows that have a date & duty value
     work = work.dropna(subset=["Pilot", "Date", "DutyHours"])
-
-    # If multiple entries per pilot/day, keep the max duty that day
     work = work.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["DutyHours"].max()
     work["Long"] = work["DutyHours"] >= float(min_hours)
     return work
@@ -161,58 +156,50 @@ def coverage_table(work):
 
 def to_csv_download(df, filename):
     csv_bytes = df.to_csv(index=False).encode("utf-8")
-    return st.download_button("Download " + filename, data=csv_bytes, file_name=filename, mime="text/csv")
+    st.download_button("Download " + filename, data=csv_bytes, file_name=filename, mime="text/csv")
 
 # -----------------------------
-# Sidebar options
+# Main
 # -----------------------------
-with st.sidebar:
-    st.header("Options")
-    dayfirst = st.checkbox("Day-first dates (DD/MM/YYYY)", value=True)
-    min_hours = st.number_input("Minimum hours to count as 'long day'", min_value=1.0, max_value=24.0, value=12.0, step=0.5)
-    st.caption("Defaults match your 12+ hour rule; you can adjust if needed.")
-
 uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
 
 if uploaded is not None:
-    # Read
     df = try_read_csv(uploaded)
     pilot_col, date_col, duty_col = infer_columns(df)
 
-    st.subheader("Column Mapping")
-    cols = list(df.columns)
-
-    pilot_col = st.selectbox("Pilot column", options=cols, index=cols.index(pilot_col) if pilot_col in cols else 0)
-    date_col = st.selectbox("Date column", options=cols, index=cols.index(date_col) if date_col in cols else 0)
-    duty_col = st.selectbox("Duty duration column", options=cols, index=cols.index(duty_col) if duty_col in cols else 0)
-
-    if st.button("Run Check", type="primary"):
-        # Build normalized duty-by-day
-        work = build_work_table(df.copy(), pilot_col, date_col, duty_col, dayfirst=dayfirst, min_hours=min_hours)
+    # If inference fails, show diagnostics and stop. No manual overrides.
+    if not pilot_col or not date_col or not duty_col:
+        st.error("Could not confidently identify required columns (Pilot, Date, Duty). "
+                 "Please adjust your export or send an example to update the detector.")
+        diag = pd.DataFrame([{
+            "pilot_col": pilot_col,
+            "date_col": date_col,
+            "duty_col": duty_col,
+            "columns_found": ", ".join(list(df.columns)[:50]) + ("..." if len(df.columns) > 50 else "")
+        }])
+        st.dataframe(diag, use_container_width=True)
+    else:
+        work = build_work_table(df.copy(), pilot_col, date_col, duty_col, min_hours=12.0)
         cov = coverage_table(work)
-
         st.markdown("### Per-Pilot Coverage")
         st.dataframe(cov, use_container_width=True)
         to_csv_download(cov, "FTL_Per_Pilot_Coverage.csv")
 
-        # Streaks for 2 and 3 consecutive days
-        st.markdown("### Streaks (≥ 2 consecutive long days)")
+        st.markdown("### Streaks (≥ 2 consecutive 12+ hr days)")
         seq2 = streaks(work, min_consecutive=2)
         st.dataframe(seq2, use_container_width=True)
-        to_csv_download(seq2, "FTL_2xLong_Consecutive_Summary.csv")
+        to_csv_download(seq2, "FTL_2x12hr_Consecutive_Summary.csv")
 
-        st.markdown("### Streaks (≥ 3 consecutive long days)")
+        st.markdown("### Streaks (≥ 3 consecutive 12+ hr days)")
         seq3 = streaks(work, min_consecutive=3)
         st.dataframe(seq3, use_container_width=True)
-        to_csv_download(seq3, "FTL_3xLong_Consecutive_Summary.csv")
+        to_csv_download(seq3, "FTL_3x12hr_Consecutive_Summary.csv")
 
-        # Full normalized detail
         st.markdown("### Parsed Duty by Day (normalized)")
         st.dataframe(work, use_container_width=True)
         to_csv_download(work, "FTL_Duty_By_Day_Parsed.csv")
-
 else:
     st.info("Upload the FTL CSV to begin.")
 
 st.markdown("---")
-st.caption("Tip: If your export lists a pilot name once with blank rows beneath, this tool forward-fills the pilot name to those rows automatically.")
+st.caption("Note: Pilot names are forward-filled through blank rows until the next pilot header; dates parsed as day-first (DD/MM/YYYY).")
