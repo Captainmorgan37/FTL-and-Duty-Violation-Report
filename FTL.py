@@ -62,12 +62,13 @@ def consolidate_fdps(ftl):
         is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
         is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
 
+        # --- If switching crew member ---
         if cur is None or name != cur["Name"]:
             if cur is not None:
                 periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,
+                "Date": date,   # always take the parsed date if present
                 "duty_start": start_t,
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
                 "duty_end": end_t,
@@ -78,11 +79,13 @@ def consolidate_fdps(ftl):
             }
             continue
 
+        # --- If split duty or new start of FDP ---
         if is_split or is_new_start:
             periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date if date else cur["Date"],   # inherit date if missing
+                # always use row date if present, otherwise keep current
+                "Date": date if pd.notna(date) else cur["Date"],
                 "duty_start": start_t if start_t else cur["duty_start"],
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
                 "duty_end": end_t if end_t else cur["duty_end"],
@@ -93,23 +96,28 @@ def consolidate_fdps(ftl):
             }
             continue
 
+        # --- Update current duty period ---
         if end_t:
             cur["duty_end"] = end_t
             if not (is_positioning or is_sim_evt):
                 cur["fdp_end"] = end_t
 
+        # overwrite hrs7d / hrs30d if present
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-        if not date and cur["Date"]:
-            row["Date"] = cur["Date"]
+        # --- ensure date is not lost, even for positioning ---
+        if pd.notna(date):
+            cur["Date"] = date
 
+    # append the last open period
     if cur is not None:
         periods.append(cur)
 
     return pd.DataFrame(periods)
+
 
 # ---------- File upload ----------
 uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
