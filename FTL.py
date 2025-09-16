@@ -46,68 +46,61 @@ def excel_time_to_time(val):
     return None
 
 def excel_time_to_hours(val):
-    """Convert Excel-style hh:mm:ss, Timedelta, or 1900-anchored datetime-with-days into float hours"""
+    """Convert Excel-style hh:mm:ss, Timedelta, Excel serials, or 1900-anchored datetimes into float hours"""
     if pd.isna(val):
         return None
 
-    # Case 1: Excel serial datetime anchored near 1900-01-01
+    # Case 1: Excel float serial (e.g., 30.5 = 30.5 days)
+    if isinstance(val, (int, float)):
+        return float(val) * 24.0
+
+    # Case 2: Pandas Timestamp (often 1900-01-01 + N days)
     if isinstance(val, pd.Timestamp):
         anchor = pd.Timestamp(1900, 1, 1)
         try:
             days = (val.normalize() - anchor).days
-            if days < 0 or days > 4000:  # If it's clearly a real date, ignore days
+            if days < 0 or days > 50000:  # If it's clearly a real date (not duration), ignore days
                 days = 0
         except Exception:
             days = 0
         return days * 24.0 + val.hour + val.minute/60.0 + val.second/3600.0
 
-    # Case 2: True pandas Timedelta
+    # Case 3: Timedelta (e.g., '7 days 08:20:00')
     if isinstance(val, pd.Timedelta):
         return val.total_seconds() / 3600.0
 
-    # Case 3: String like "7 days 08:20:00" or "2 days"
+    # Case 4: String formats
     s = str(val).strip().lower()
     if "day" in s:
-        parts = s.replace("days", "day").split("day")
-        try:
-            days = int(parts[0].strip())
-        except:
-            days = 0
+        # e.g., "7 days 08:20:00"
+        import re
+        m = re.match(r"(\d+)\s*day[s]?\s*(.*)", s)
+        days = int(m.group(1)) if m else 0
+        tail = m.group(2).strip() if m and m.group(2) else ""
         hh = mm = ss = 0
-        tail = parts[1].strip() if len(parts) > 1 else ""
         if ":" in tail:
-            clean_parts = [p for p in tail.split(":") if p.strip() != ""]
-            tparts = []
-            for p in clean_parts:
-                try:
-                    tparts.append(int(p))
-                except:
-                    tparts.append(0)
-            while len(tparts) < 3:
-                tparts.append(0)
-            hh, mm, ss = tparts[:3]
-        return days * 24.0 + hh + mm/60.0 + ss/3600.0
+            parts = [int(p) if p.isdigit() else 0 for p in tail.split(":")]
+            while len(parts) < 3:
+                parts.append(0)
+            hh, mm, ss = parts[:3]
+        return days * 24 + hh + mm/60 + ss/3600
 
     if ":" in s:
         try:
-            clean_parts = [p for p in s.split(":") if p.strip() != ""]
-            tparts = []
-            for p in clean_parts:
-                try:
-                    tparts.append(int(p))
-                except:
-                    tparts.append(0)
-            while len(tparts) < 3:
-                tparts.append(0)
-            hh, mm, ss = tparts[:3]
-            return hh + mm/60.0 + ss/3600.0
+            parts = [int(p) if p.isdigit() else 0 for p in s.split(":")]
+            while len(parts) < 3:
+                parts.append(0)
+            hh, mm, ss = parts[:3]
+            return hh + mm/60 + ss/3600
         except:
             return None
 
+    # Fallback: try casting to float
     try:
         return float(s)
     except:
         return None
+
 
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
