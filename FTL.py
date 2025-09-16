@@ -68,9 +68,7 @@ def consolidate_fdps(ftl):
 
     for _, row in ftl.iterrows():
         name = row["Name"]
-        # Always have a date: current row if present else carry from cur
         date = row["Date_parsed"]
-        this_date = date if not pd.isna(date) else (cur["Date"] if cur else None)
 
         sd_raw = str(row.get("Start Duty", "") or "")
         duty_raw = str(row.get("Duty", "") or "")
@@ -82,42 +80,44 @@ def consolidate_fdps(ftl):
         is_split = "(split)" in sd_raw.lower()
         is_positioning = duty_raw.strip().startswith("P ")
         is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
-        is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
         is_rest = "rest" in reason_raw.lower()
 
-        # Explicit Rest row: close out and reset (rest day should not merge chains)
-        if is_rest:
+        # --- Rows with only a Date (no duty times) should still reset chain ---
+        if pd.notna(date) and start_t is None and end_t is None:
             if cur is not None:
                 periods.append(cur)
             cur = None
             continue
 
-        # New crew (or first record)
-        if cur is None or name != cur["Name"]:
+        # --- Rest / SIM / P legs cut the chain ---
+        if is_rest or is_positioning or is_sim_evt:
             if cur is not None:
                 periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": this_date,
-                "duty_start": start_t,
-                "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
-                "duty_end": end_t,
+                "Date": date,
+                "duty_start": None,
+                "fdp_end": None,
+                "duty_end": None,
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": False,
                 "break_min": None,
             }
+            periods.append(cur)
+            cur = None
             continue
 
-        # Split duty marker or a new real start of FDP
-        if is_split or is_new_start:
-            periods.append(cur)
+        # --- New pilot or first record ---
+        if cur is None or name != cur["Name"]:
+            if cur is not None:
+                periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": this_date,
-                "duty_start": start_t if start_t else cur["duty_start"],
-                "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
-                "duty_end": end_t if end_t else cur["duty_end"],
+                "Date": date,
+                "duty_start": start_t,
+                "fdp_end": end_t,
+                "duty_end": end_t,
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": is_split,
@@ -125,19 +125,34 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # Continue current duty period
+        # --- Split duty explicitly starts new FDP ---
+        if is_split:
+            periods.append(cur)
+            cur = {
+                "Name": name,
+                "Date": date,
+                "duty_start": start_t if start_t else cur["duty_start"],
+                "fdp_end": end_t,
+                "duty_end": end_t,
+                "hrs7d": row["hrs7d"],
+                "hrs30d": row["hrs30d"],
+                "split": True,
+                "break_min": None,
+            }
+            continue
+
+        # --- Extend current duty ---
         if end_t:
             cur["duty_end"] = end_t
-            if not (is_positioning or is_sim_evt):
-                cur["fdp_end"] = end_t
+            cur["fdp_end"] = end_t
 
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-        if this_date:
-            cur["Date"] = this_date
+        if pd.notna(date):
+            cur["Date"] = date
 
     if cur is not None:
         periods.append(cur)
