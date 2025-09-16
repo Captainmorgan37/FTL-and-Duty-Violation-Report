@@ -5,14 +5,14 @@ import numpy as np
 import re
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL Audit: Duty & Rest Checks (Locked)", layout="wide")
-st.title("FTL Audit: Duty & Rest Checks (Locked)")
+st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy (Locked)", layout="wide")
+st.title("FTL Audit: Duty, Rest & 7d/30d Policy (Locked)")
 
 st.markdown(
-    "Upload the FL3XX **Flight Time Limitations (FTL)** CSV export. "
-    "This runs two locked checks per pilot:"
-    "\n\n- **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days"
-    "\n- **Short Rest**: ≥2 consecutive days with **rest < 11 hours**"
+    "Upload the relevant CSV exports and the app will run three locked checks:"
+    "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
+    "\n2) **Short Rest**: ≥2 consecutive days with **rest < 11 hours** _(FTL CSV)_"
+    "\n3) **7d/30d Policy**: Company 7-day/30-day flight-time screen with **Rest After FDP (act)** ≥ 11 h _(Duty Violation CSV)_"
 )
 
 # -----------------------------
@@ -37,9 +37,9 @@ def parse_duration_to_hours(val):
     m2 = re.match(r"^(\d+)\s*(m|min)$", s, flags=re.I)
     if m2:
         return int(m2.group(1)) / 60.0
-    # integer hours "12"
-    if re.match(r"^\d+$", s):
-        return float(int(s))
+    # integer or decimal hours "12" / "12.5"
+    if re.match(r"^\d+(\.\d+)?$", s):
+        return float(s)
     # compound "12h30m"
     h = re.search(r"(\d+)\s*h", s, flags=re.I)
     mi = re.search(r"(\d+)\s*m", s, flags=re.I)
@@ -61,14 +61,12 @@ def try_read_csv(uploaded_file):
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, sep=";", engine="python", encoding="utf-8", on_bad_lines="skip")
 
+# ---------- Column inference (FTL CSV) ----------
 def infer_common_columns(df):
-    # Normalize headers
     cols = [c.strip() for c in df.columns]
     df.columns = cols
-
     pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
     pilot_col = pilot_candidates[0] if pilot_candidates else None
-
     date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
     date_col = None
     for c in date_candidates:
@@ -76,7 +74,6 @@ def infer_common_columns(df):
         if parsed.notna().mean() > 0.5:
             date_col = c
             break
-
     return pilot_col, date_col
 
 def infer_duty_column(df):
@@ -101,7 +98,7 @@ def infer_duty_column(df):
                 duty_col = c; break
     return duty_col
 
-def infer_rest_column(df):
+def infer_rest_column_ftl(df):
     cols = list(df.columns)
     rest_candidates = []
     rest_candidates += [c for c in cols if re.search(r"\brest\b", c, re.I)]
@@ -128,6 +125,35 @@ def infer_rest_column(df):
                     break
     return rest_col
 
+# ---------- Column inference (Duty Violation CSV) ----------
+def infer_policy_columns(dv_df):
+    cols = [c.strip() for c in dv_df.columns]
+    dv_df.columns = cols
+    pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
+    pilot_col = pilot_candidates[0] if pilot_candidates else None
+    c7_candidates = [c for c in cols if re.search(r"\b7\s*d(ay|ays)?\b|\b7d\b|past\s*7", c, re.I)]
+    c30_candidates = [c for c in cols if re.search(r"\b30\s*d(ay|ays)?\b|\b30d\b|past\s*30", c, re.I)]
+    if not c7_candidates:
+        c7_candidates = [c for c in cols if re.search(r"(7d|past.?7).*(flight|block|time)", c, re.I)]
+    if not c30_candidates:
+        c30_candidates = [c for c in cols if re.search(r"(30d|past.?30).*(flight|block|time)", c, re.I)]
+    c7 = c7_candidates[0] if c7_candidates else None
+    c30 = c30_candidates[0] if c30_candidates else None
+    rest_candidates = [c for c in cols if re.search(r"Rest\s*After\s*FDP.*\(act\)", c, re.I)]
+    if not rest_candidates:
+        rest_candidates = [c for c in cols if re.search(r"Rest.*FDP.*act", c, re.I)]
+    rest_col = rest_candidates[0] if rest_candidates else None
+    # optional date
+    date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
+    date_col = None
+    for c in date_candidates:
+        parsed = pd.to_datetime(dv_df[c], errors="coerce", dayfirst=True)
+        if parsed.notna().mean() > 0.5:
+            date_col = c
+            break
+    return pilot_col, c7, c30, rest_col, date_col
+
+# ---------- Builders & streak logic ----------
 def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0):
     df[pilot_col] = df[pilot_col].ffill()
     work = df[[pilot_col, date_col, duty_col]].copy()
@@ -146,7 +172,6 @@ def build_rest_table(df, pilot_col, date_col, rest_col, short_thresh=11.0):
     rest["Date"] = pd.to_datetime(rest["Date"], errors="coerce", dayfirst=True)
     rest["RestHours"] = rest["RestRaw"].map(parse_duration_to_hours)
     rest = rest.dropna(subset=["Pilot", "Date", "RestHours"])
-    # per day, choose MIN rest observed (conservative)
     rest = rest.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["RestHours"].min()
     rest["ShortRest"] = rest["RestHours"] < float(short_thresh)
     return rest
@@ -200,99 +225,147 @@ def to_csv_download(df, filename, key=None):
     st.download_button("Download " + filename, data=csv_bytes, file_name=filename, mime="text/csv", key=key)
 
 # -----------------------------
-# Main
+# Uploaders
 # -----------------------------
-uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
+st.sidebar.header("Uploads")
+ftl_file = st.sidebar.file_uploader("FTL CSV (for Duty & Short Rest checks)", type=["csv"], key="ftl_csv")
+dv_file = st.sidebar.file_uploader("Duty Violation CSV (for 7d/30d Policy)", type=["csv"], key="dv_csv")
 
-if uploaded is not None:
-    df = try_read_csv(uploaded)
-    pilot_col, date_col = infer_common_columns(df.copy())
+# -----------------------------
+# Tabs
+# -----------------------------
+tab_results, tab_policy, tab_debug = st.tabs(["Results (FTL)", "7d/30d Policy (Duty Violation)", "Debug"])
 
-    if not pilot_col or not date_col:
-        st.error("Could not confidently identify common columns (Pilot, Date).")
-        diag = pd.DataFrame([{
-            "pilot_col": pilot_col,
-            "date_col": date_col,
-            "columns_found": ", ".join(list(df.columns)[:60]) + ("..." if len(df.columns) > 60 else "")
-        }])
-        st.dataframe(diag, use_container_width=True)
+with tab_results:
+    if ftl_file is None:
+        st.info("Upload the **FTL CSV** in the sidebar to run Duty Streaks and Short Rest checks.")
     else:
-        duty_col = infer_duty_column(df.copy())
-        rest_col = infer_rest_column(df.copy())
+        df = try_read_csv(ftl_file)
+        pilot_col, date_col = infer_common_columns(df.copy())
 
-        if not duty_col and not rest_col:
-            st.error("Could not identify Duty or Rest columns. Please review your export.")
-            st.write("Columns found:", list(df.columns)[:60])
+        if not pilot_col or not date_col:
+            st.error("Could not confidently identify common columns (Pilot, Date) in the FTL CSV.")
+            st.write("Columns:", list(df.columns)[:60])
         else:
-            # Build tables as available
-            duty_work = None; rest_work = None
-            if duty_col:
-                duty_work = build_duty_table(df.copy(), pilot_col, date_col, duty_col, min_hours=12.0)
-                seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
-                seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
-            if rest_col:
-                rest_work = build_rest_table(df.copy(), pilot_col, date_col, rest_col, short_thresh=11.0)
-                seq2_rest = streaks(rest_work, "ShortRest", min_consecutive=2)
+            duty_col = infer_duty_column(df.copy())
+            rest_col = infer_rest_column_ftl(df.copy())
 
-            results_tab, debug_tab = st.tabs(["Results", "Debug"])
+            if not duty_col and not rest_col:
+                st.error("Could not identify Duty or Rest columns in the FTL CSV.")
+            else:
+                duty_work = None; rest_work = None
+                if duty_col:
+                    duty_work = build_duty_table(df.copy(), pilot_col, date_col, duty_col, min_hours=12.0)
+                    seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
+                    seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
+                if rest_col:
+                    rest_work = build_rest_table(df.copy(), pilot_col, date_col, rest_col, short_thresh=11.0)
+                    seq2_rest = streaks(rest_work, "ShortRest", min_consecutive=2)
 
-            with results_tab:
+                st.subheader("Duty Streaks (12+ hr days)")
+                if duty_work is not None and not seq3_duty.empty:
+                    pilots = sorted(seq3_duty["Pilot"].unique().tolist())
+                    st.error(f"⚠️ 3-day duty rule TRIGGERED: {len(pilots)} pilot(s): {', '.join(pilots)}")
+                else:
+                    st.success("✅ No pilots with ≥3 consecutive 12+ hr duty days detected.")
+
+                st.markdown("**≥ 3 consecutive 12+ hr duty days**")
+                st.dataframe(seq3_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
                 if duty_work is not None:
-                    st.subheader("Duty Streaks (12+ hr days)")
-                    if duty_work is not None and not seq3_duty.empty:
-                        pilots = sorted(seq3_duty["Pilot"].unique().tolist())
-                        st.error(f"⚠️ 3-day duty rule TRIGGERED: {len(pilots)} pilot(s): {', '.join(pilots)}")
-                    else:
-                        st.success("✅ No pilots with ≥3 consecutive 12+ hr duty days detected.")
+                    to_csv_download(seq3_duty, "FTL_3x12hr_Consecutive_Duty_Summary.csv", key="dl_duty3")
 
-                    st.markdown("**≥ 3 consecutive 12+ hr duty days**")
-                    st.dataframe(seq3_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
-                    if duty_work is not None:
-                        to_csv_download(seq3_duty, "FTL_3x12hr_Consecutive_Duty_Summary.csv", key="dl_duty3")
-
-                    st.markdown("**≥ 2 consecutive 12+ hr duty days**")
-                    st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
-                    if duty_work is not None:
-                        to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
+                st.markdown("**≥ 2 consecutive 12+ hr duty days**")
+                st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
+                if duty_work is not None:
+                    to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
 
                 st.markdown("---")
+                st.subheader("Short Rest (< 11 hr)")
+                if rest_work is not None and not seq2_rest.empty:
+                    pilots_r = sorted(seq2_rest["Pilot"].unique().tolist())
+                    st.error(f"⚠️ Short Rest TRIGGERED: {len(pilots_r)} pilot(s) with ≥2 consecutive days of rest < 11 hr: {', '.join(pilots_r)}")
+                else:
+                    st.success("✅ No pilots with ≥2 consecutive days of rest < 11 hr detected.")
 
+                st.markdown("**≥ 2 consecutive days with rest < 11 hr**")
+                st.dataframe(seq2_rest if rest_work is not None else pd.DataFrame(), use_container_width=True)
                 if rest_work is not None:
-                    st.subheader("Short Rest (< 11 hr)")
-                    if not seq2_rest.empty:
-                        pilots_r = sorted(seq2_rest["Pilot"].unique().tolist())
-                        st.error(f"⚠️ Short Rest TRIGGERED: {len(pilots_r)} pilot(s) with ≥2 consecutive days of rest < 11 hr: {', '.join(pilots_r)}")
-                    else:
-                        st.success("✅ No pilots with ≥2 consecutive days of rest < 11 hr detected.")
-
-                    st.markdown("**≥ 2 consecutive days with rest < 11 hr**")
-                    st.dataframe(seq2_rest, use_container_width=True)
                     to_csv_download(seq2_rest, "FTL_Consecutive_Short_Rest_Summary.csv", key="dl_rest2")
 
-            with debug_tab:
-                st.caption("Diagnostics & normalized tables (for troubleshooting)")
+with tab_policy:
+    if dv_file is None:
+        st.info("Upload the **Duty Violation CSV** in the sidebar to run the 7d/30d policy screen.")
+    else:
+        dv = try_read_csv(dv_file)
+        pilot_col, c7, c30, rest_col, date_col = infer_policy_columns(dv.copy())
 
-                if duty_work is not None:
-                    st.markdown("### Duty — Per-Pilot Coverage")
-                    cov_duty = coverage_table(duty_work, "LongDuty")
-                    st.dataframe(cov_duty, use_container_width=True)
-                    to_csv_download(cov_duty, "FTL_Duty_Per_Pilot_Coverage.csv", key="dl_cov_duty")
+        if not (pilot_col and c7 and c30 and rest_col):
+            st.error("Could not identify one or more required columns in Duty Violation CSV (Pilot, 7d, 30d, Rest After FDP (act)).")
+            st.write("Columns:", list(dv.columns)[:70])
+        else:
+            dv[pilot_col] = dv[pilot_col].ffill()
+            cols = [pilot_col, c7, c30, rest_col] + ([date_col] if date_col else [])
+            work = dv[cols].copy()
+            new_cols = ["Pilot", "Hours7dRaw", "Hours30dRaw", "RestRaw"] + (["Date"] if date_col else [])
+            work.columns = new_cols
 
-                    st.markdown("### Duty — Parsed Duty by Day (normalized)")
-                    st.dataframe(duty_work, use_container_width=True)
-                    to_csv_download(duty_work, "FTL_Duty_By_Day_Parsed.csv", key="dl_work_duty")
+            work["Hours7d"] = work["Hours7dRaw"].map(parse_duration_to_hours)
+            work["Hours30d"] = work["Hours30dRaw"].map(parse_duration_to_hours)
+            work["RestHrs"] = work["RestRaw"].map(parse_duration_to_hours)
+            if date_col:
+                work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
 
-                if rest_work is not None:
-                    st.markdown("### Rest — Per-Pilot Coverage")
-                    cov_rest = coverage_table(rest_work, "ShortRest")
-                    st.dataframe(cov_rest, use_container_width=True)
-                    to_csv_download(cov_rest, "FTL_Rest_Per_Pilot_Coverage.csv", key="dl_cov_rest")
+            # Clean
+            work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestHrs"])
 
-                    st.markdown("### Rest — Parsed Rest by Day (normalized)")
-                    st.dataframe(rest_work, use_container_width=True)
-                    to_csv_download(rest_work, "FTL_Rest_By_Day_Parsed.csv", key="dl_work_rest")
-else:
-    st.info("Upload the FTL CSV to begin.")
+            # Aggregate most conservative per date (min rest) and max rolling totals
+            group_keys = ["Pilot"] + (["Date"] if date_col else [])
+            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestHrs": "min"}
+            work = work.sort_values(group_keys).groupby(group_keys, as_index=False).agg(aggdict)
 
-st.markdown("---")
-st.caption("Locked inference: Pilot and Date detected, Pilot names forward-filled. Dates parsed as day-first (DD/MM/YYYY).")
+            # Policy
+            work["Over40in7d"] = work["Hours7d"] > 40.0
+            work["Under48_7d"] = work["Hours7d"] < 48.0
+            work["Under70_30d"] = work["Hours30d"] < 70.0
+            work["ShortTurn"] = work["RestHrs"] < 11.0
+
+            def classify(row):
+                if not row["Over40in7d"]:
+                    return "OK (≤40 in 7d)"
+                if row["Under48_7d"] and row["Under70_30d"]:
+                    return "Allowed with 11h turn (PASS)" if not row["ShortTurn"] else "Allowed with 11h turn (FAIL — rest < 11h)"
+                if row["Hours7d"] >= 48.0 or row["Hours30d"] >= 70.0:
+                    return "Not Allowed (≥48 in 7d or ≥70 in 30d)"
+                return "Review"
+
+            work["PolicyStatus"] = work.apply(classify, axis=1)
+
+            # Banners
+            not_allowed = work[work["PolicyStatus"].str.contains("Not Allowed", na=False)]
+            exception_fail = work[work["PolicyStatus"].str.contains("FAIL", na=False)]
+            exception_pass = work[work["PolicyStatus"].str.contains("PASS", na=False)]
+
+            if not not_allowed.empty or not exception_fail.empty:
+                bad_pilots = sorted(set(not_allowed["Pilot"].tolist() + exception_fail["Pilot"].tolist()))
+                st.error(f"⚠️ Policy VIOLATIONS detected: {len(bad_pilots)} pilot(s): {', '.join(bad_pilots)}")
+            else:
+                st.success("✅ No 'Not Allowed' or 'Exception FAIL' rows detected.")
+
+            # Tables
+            st.markdown("**Not Allowed (≥48 in 7d or ≥70 in 30d)**")
+            st.dataframe(not_allowed, use_container_width=True)
+            to_csv_download(not_allowed, "DutyViolation_not_allowed_ge48_7d_or_ge70_30d.csv", key="dl_na")
+
+            st.markdown("**Over 40 in 7d — EXCEPTION FAIL (Rest < 11 h)**")
+            st.dataframe(exception_fail, use_container_width=True)
+            to_csv_download(exception_fail, "DutyViolation_over40_exception_FAIL_restlt11.csv", key="dl_fail")
+
+            st.markdown("**Over 40 in 7d — EXCEPTION PASS (Rest ≥ 11 h)**")
+            st.dataframe(exception_pass, use_container_width=True)
+            to_csv_download(exception_pass, "DutyViolation_over40_exception_PASS_rest_ge11.csv", key="dl_pass")
+
+            # Full export
+            to_csv_download(work, "DutyViolation_with_Rest_policy_screen.csv", key="dl_all")
+
+with tab_debug:
+    st.caption("Diagnostics and raw/normalized tables are shown in prior versions; if you need them here too, I can add coverage views.")
