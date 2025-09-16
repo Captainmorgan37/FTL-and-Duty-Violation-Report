@@ -63,7 +63,13 @@ def excel_time_to_hours(val):
         hh = mm = ss = 0
         tail = parts[1].strip() if len(parts) > 1 else ""
         if ":" in tail:
-            tparts = [int(x) for x in tail.split(":")]
+            clean_parts = [p for p in tail.split(":") if p.strip() != ""]
+            tparts = []
+            for p in clean_parts:
+                try:
+                    tparts.append(int(p))
+                except:
+                    tparts.append(0)
             while len(tparts) < 3:
                 tparts.append(0)
             hh, mm, ss = tparts[:3]
@@ -71,10 +77,16 @@ def excel_time_to_hours(val):
 
     if ":" in s:
         try:
-            parts = [int(x) for x in s.split(":")]
-            while len(parts) < 3:
-                parts.append(0)
-            hh, mm, ss = parts[:3]
+            clean_parts = [p for p in s.split(":") if p.strip() != ""]
+            tparts = []
+            for p in clean_parts:
+                try:
+                    tparts.append(int(p))
+                except:
+                    tparts.append(0)
+            while len(tparts) < 3:
+                tparts.append(0)
+            hh, mm, ss = tparts[:3]
             return hh + mm/60.0 + ss/3600.0
         except:
             return None
@@ -83,6 +95,7 @@ def excel_time_to_hours(val):
         return float(s)
     except:
         return None
+
 
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
