@@ -53,6 +53,7 @@ def consolidate_fdps(ftl):
 
         sd_raw = str(row.get("Start Duty", "") or "")
         duty_raw = str(row.get("Duty", "") or "")
+        reason_raw = str(row.get("Reason", "") or "")
 
         start_t = row["StartDuty_t"]
         end_t = row["BlocksOn_t"]
@@ -61,6 +62,14 @@ def consolidate_fdps(ftl):
         is_positioning = duty_raw.strip().startswith("P ")
         is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
         is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
+        is_rest = "rest" in reason_raw.lower()
+
+        # --- New: if explicit rest, close out current duty and reset ---
+        if is_rest:
+            if cur is not None:
+                periods.append(cur)
+            cur = None
+            continue
 
         # --- If switching crew member ---
         if cur is None or name != cur["Name"]:
@@ -68,7 +77,7 @@ def consolidate_fdps(ftl):
                 periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,   # always take the parsed date if present
+                "Date": date,
                 "duty_start": start_t,
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
                 "duty_end": end_t,
@@ -84,7 +93,6 @@ def consolidate_fdps(ftl):
             periods.append(cur)
             cur = {
                 "Name": name,
-                # always use row date if present, otherwise keep current
                 "Date": date if pd.notna(date) else cur["Date"],
                 "duty_start": start_t if start_t else cur["duty_start"],
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
@@ -102,17 +110,14 @@ def consolidate_fdps(ftl):
             if not (is_positioning or is_sim_evt):
                 cur["fdp_end"] = end_t
 
-        # overwrite hrs7d / hrs30d if present
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-        # --- ensure date is not lost, even for positioning ---
         if pd.notna(date):
             cur["Date"] = date
 
-    # append the last open period
     if cur is not None:
         periods.append(cur)
 
@@ -141,29 +146,29 @@ if uploaded:
     fdp = consolidate_fdps(ftl)
 
     # FDP + Duty length
-    fdp["FDP_min"] = None
-    fdp["Duty_min"] = None
+fdp["FDP_min"] = None
+fdp["Duty_min"] = None
 
-    for i, r in fdp.iterrows():
-        s = to_dt(r["Date"], r["duty_start"])
-        fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
-        duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
+for i, r in fdp.iterrows():
+    s = to_dt(r["Date"], r["duty_start"])
+    fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
+    duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
 
-        if not s or not duty_e:
-            continue
+    if not s or not duty_e:
+        continue
 
-        if fdp_e:
-            fdp_end = fdp_e + timedelta(minutes=15)
-            if fdp_end < s:
-                fdp_end += timedelta(days=1)
-            fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
+    # --- Fix: bump FDP end forward if it looks like post-midnight ---
+    if fdp_e:
+        fdp_end = fdp_e + timedelta(minutes=15)
+        if fdp_end < s or (s.hour > 18 and fdp_end.hour < 6):
+            fdp_end += timedelta(days=1)
+        fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
 
-        if duty_e < s:
-            duty_e += timedelta(days=1)
-        fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
+    # --- Fix: bump duty end forward if overnight ---
+    if duty_e < s or (s.hour > 18 and duty_e.hour < 6):
+        duty_e += timedelta(days=1)
+    fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
 
-    fdp["FDP_hrs"] = fdp["FDP_min"].apply(minutes_to_hours)
-    fdp["Duty_hrs"] = fdp["Duty_min"].apply(minutes_to_hours)
 
     # Turns
     fdp = fdp.sort_values(["Name", "Date", "duty_start", "duty_end"]).reset_index(drop=True)
