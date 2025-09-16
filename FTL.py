@@ -33,14 +33,32 @@ def excel_time_to_time(val):
     return None
 
 def excel_time_to_hours(val):
-    """Convert Excel-style hh:mm:ss into float hours"""
+    """Convert Excel-style hh:mm:ss, Timedelta, or day+time into float hours"""
     if pd.isna(val):
         return None
+
+    # Case 1: Excel Timestamp (1900 anchor date)
     if isinstance(val, pd.Timestamp):
         return val.hour + val.minute/60 + val.second/3600
+
+    # Case 2: Timedelta (e.g., '7 days 08:20:00')
     if isinstance(val, pd.Timedelta):
-        return val.total_seconds()/3600
-    s = str(val).strip()
+        return val.total_seconds() / 3600.0
+
+    # Case 3: String
+    s = str(val).strip().lower()
+    if "day" in s:
+        # e.g., "7 days 08:20:00" or "2 days"
+        parts = s.replace("days", "").replace("day", "").strip().split()
+        days = int(parts[0])
+        hh, mm, ss = 0, 0, 0
+        if len(parts) > 1 and ":" in parts[1]:
+            tparts = [int(x) for x in parts[1].split(":")]
+            while len(tparts) < 3:
+                tparts.append(0)
+            hh, mm, ss = tparts
+        return days*24 + hh + mm/60 + ss/3600
+
     if ":" in s:
         try:
             parts = [int(x) for x in s.split(":")]
@@ -50,10 +68,12 @@ def excel_time_to_hours(val):
             return hh + mm/60 + ss/3600
         except:
             return None
+
     try:
         return float(s)
     except:
         return None
+
 
 def to_dt(d, t):
     return None if pd.isna(d) or t is None else datetime.combine(d, t)
