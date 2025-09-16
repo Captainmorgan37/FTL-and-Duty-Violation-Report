@@ -82,20 +82,17 @@ def consolidate_fdps(ftl):
         is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
         is_rest = "rest" in reason_raw.lower()
 
-        # --- Rows with only a Date (no duty times) should still reset chain ---
-        if pd.notna(date) and start_t is None and end_t is None:
-            if cur is not None:
-                periods.append(cur)
-            cur = None
-            continue
+        # Always carry a date forward
+        this_date = date if pd.notna(date) else (cur["Date"] if cur else None)
 
-        # --- Rest / SIM / P legs cut the chain ---
-        if is_rest or is_positioning or is_sim_evt:
+        # --- Explicit reset rows (Rest, SIM, Positioning, or date-only marker) ---
+        if is_rest or is_positioning or is_sim_evt or (pd.notna(date) and start_t is None and end_t is None):
             if cur is not None:
                 periods.append(cur)
-            cur = {
+            # Keep a placeholder so the date isn't dropped
+            periods.append({
                 "Name": name,
-                "Date": date,
+                "Date": this_date,
                 "duty_start": None,
                 "fdp_end": None,
                 "duty_end": None,
@@ -103,18 +100,17 @@ def consolidate_fdps(ftl):
                 "hrs30d": row["hrs30d"],
                 "split": False,
                 "break_min": None,
-            }
-            periods.append(cur)
+            })
             cur = None
             continue
 
-        # --- New pilot or first record ---
+        # --- New pilot or first duty ---
         if cur is None or name != cur["Name"]:
             if cur is not None:
                 periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,
+                "Date": this_date,
                 "duty_start": start_t,
                 "fdp_end": end_t,
                 "duty_end": end_t,
@@ -125,12 +121,12 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # --- Split duty explicitly starts new FDP ---
+        # --- Split duty starts new FDP ---
         if is_split:
             periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,
+                "Date": this_date,
                 "duty_start": start_t if start_t else cur["duty_start"],
                 "fdp_end": end_t,
                 "duty_end": end_t,
@@ -151,13 +147,14 @@ def consolidate_fdps(ftl):
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-        if pd.notna(date):
-            cur["Date"] = date
+        if this_date:
+            cur["Date"] = this_date
 
     if cur is not None:
         periods.append(cur)
 
     return pd.DataFrame(periods)
+
 
 # ---------- File upload ----------
 uploaded = st.file_uploader("Upload FL3XX FTL CSV", type=["csv"])
