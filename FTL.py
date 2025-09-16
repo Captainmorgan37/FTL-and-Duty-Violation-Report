@@ -254,6 +254,11 @@ if uploaded:
     debug_cols = ["Name", "Date", "Date_parsed"]
     debug_cols += [c for c in ftl.columns if c.endswith("_t")]
     debug_cols += [c for c in ftl.columns if c.startswith("hrs_")]
+
+    # Remove duplicate entries from debug_cols list
+    seen = set()
+    debug_cols = [c for c in debug_cols if not (c in seen or seen.add(c))]
+
     st.subheader("Parsed Data (debug)")
     st.dataframe(ftl[debug_cols].head(30), use_container_width=True)
 
