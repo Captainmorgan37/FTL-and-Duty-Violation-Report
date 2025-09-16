@@ -64,20 +64,23 @@ def consolidate_fdps(ftl):
         is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
         is_rest = "rest" in reason_raw.lower()
 
-        # --- Explicit Rest row cuts the duty chain ---
+        # --- If explicit rest: close out current duty ---
         if is_rest:
             if cur is not None:
                 periods.append(cur)
             cur = None
             continue
 
-        # --- If switching crew member ---
+        # --- Always ensure we have a date ---
+        this_date = date if pd.notna(date) else (cur["Date"] if cur else None)
+
+        # --- New crew or first record ---
         if cur is None or name != cur["Name"]:
             if cur is not None:
                 periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,
+                "Date": this_date,
                 "duty_start": start_t,
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
                 "duty_end": end_t,
@@ -88,12 +91,12 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # --- If split duty or new FDP start ---
+        # --- Split duty or new FDP start ---
         if is_split or is_new_start:
             periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date if pd.notna(date) else cur["Date"],
+                "Date": this_date,
                 "duty_start": start_t if start_t else cur["duty_start"],
                 "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
                 "duty_end": end_t if end_t else cur["duty_end"],
@@ -115,8 +118,8 @@ def consolidate_fdps(ftl):
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
 
-        if pd.notna(date):
-            cur["Date"] = date
+        if this_date:
+            cur["Date"] = this_date
 
     if cur is not None:
         periods.append(cur)
