@@ -6,18 +6,15 @@ def excel_time_to_time(val):
     """Convert Excel-style hh:mm:ss into datetime.time"""
     if pd.isna(val):
         return None
-    # Case 1: Excel "Timestamp" anchored at 1900-01-01
     if isinstance(val, pd.Timestamp):
         if val.year == 1900:
             return time(val.hour, val.minute, val.second)
         return val.time()
-    # Case 2: Timedelta
     if isinstance(val, pd.Timedelta):
         total_seconds = int(val.total_seconds())
         h, m = divmod(total_seconds // 60, 60)
         s = total_seconds % 60
         return time(h % 24, m, s)
-    # Case 3: String "hh:mm:ss"
     s = str(val).strip()
     if ":" in s:
         try:
@@ -57,21 +54,33 @@ def parse_ftl_excel(path, sheet="Sheet1"):
     df = pd.read_excel(path, sheet_name=sheet)
 
     # Forward-fill pilot name
-    df["Name"] = df["Name"].ffill()
+    if "Name" in df.columns:
+        df["Name"] = df["Name"].ffill()
 
     # Parse date column (dd.mm.yyyy format)
-    df["Date_parsed"] = pd.to_datetime(df["Date"], format="%d.%m.%Y", errors="coerce").dt.date
+    if "Date" in df.columns:
+        df["Date_parsed"] = pd.to_datetime(df["Date"], format="%d.%m.%Y", errors="coerce").dt.date
 
-    # Normalize key time-of-day fields
-    time_cols = ["Start Duty", "Blocks Off", "Ldg", "Blocks On"]
-    for col in time_cols:
-        if col in df.columns:
-            df[col + "_t"] = df[col].apply(excel_time_to_time)
+    # Auto-detect time-of-day columns
+    time_like_cols = []
+    for col in df.columns:
+        # Skip known non-time columns
+        if col in ["Date", "Name"]: 
+            continue
+        # Check first 20 non-null values for a ":" or Timestamp
+        sample = df[col].dropna().head(20)
+        if not sample.empty:
+            if any(isinstance(v, (pd.Timestamp, pd.Timedelta)) for v in sample):
+                time_like_cols.append(col)
+            elif any(":" in str(v) for v in sample.astype(str)):
+                time_like_cols.append(col)
 
-    # Normalize rolling totals (7d, 30d) into float hours
-    if "7d" in df.columns:
-        df["hrs7d"] = df["7d"].apply(excel_time_to_hours)
-    if "30d" in df.columns:
-        df["hrs30d"] = df["30d"].apply(excel_time_to_hours)
+    for col in time_like_cols:
+        df[col + "_t"] = df[col].apply(excel_time_to_time)
+
+    # Auto-detect rolling/duration columns (7d, 30d, 365d, etc.)
+    duration_cols = [c for c in df.columns if any(x in c.lower() for x in ["7d", "30d", "365d"])]
+    for col in duration_cols:
+        df["hrs_" + col] = df[col].apply(excel_time_to_hours)
 
     return df
