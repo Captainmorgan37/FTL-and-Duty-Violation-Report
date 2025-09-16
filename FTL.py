@@ -58,8 +58,9 @@ def consolidate_fdps(ftl):
         end_t = row["BlocksOn_t"]
 
         is_split = "(split)" in sd_raw.lower()
-        is_new_start = start_t is not None
         is_positioning = duty_raw.strip().startswith("P ")
+        is_sim_evt = duty_raw.strip().startswith(("SIM", "EVT"))
+        is_new_start = start_t is not None and not (is_positioning or is_sim_evt)
 
         if cur is None or name != cur["Name"]:
             if cur is not None:
@@ -68,8 +69,8 @@ def consolidate_fdps(ftl):
                 "Name": name,
                 "Date": date,
                 "duty_start": start_t,
-                "fdp_end": end_t if not is_positioning else None,   # FDP ends only with flown flights
-                "duty_end": end_t,                                  # Duty always extends
+                "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
+                "duty_end": end_t,
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": False,
@@ -81,10 +82,10 @@ def consolidate_fdps(ftl):
             periods.append(cur)
             cur = {
                 "Name": name,
-                "Date": date,
-                "duty_start": start_t,
-                "fdp_end": end_t if not is_positioning else None,
-                "duty_end": end_t,
+                "Date": date if date else cur["Date"],   # inherit date if missing
+                "duty_start": start_t if start_t else cur["duty_start"],
+                "fdp_end": end_t if (end_t and not (is_positioning or is_sim_evt)) else None,
+                "duty_end": end_t if end_t else cur["duty_end"],
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": is_split,
@@ -94,13 +95,16 @@ def consolidate_fdps(ftl):
 
         if end_t:
             cur["duty_end"] = end_t
-            if not is_positioning:
+            if not (is_positioning or is_sim_evt):
                 cur["fdp_end"] = end_t
 
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
             cur["hrs30d"] = row["hrs30d"]
+
+        if not date and cur["Date"]:
+            row["Date"] = cur["Date"]
 
     if cur is not None:
         periods.append(cur)
@@ -116,7 +120,6 @@ if uploaded:
     except:
         ftl = pd.read_csv(uploaded)
 
-    # Normalize pilot names (carry forward blanks)
     ftl["Name"] = ftl["Name"].ffill()
     ftl["RowOrder"] = range(len(ftl))
     ftl["Date_parsed"] = pd.to_datetime(ftl["Date"], errors="coerce").dt.date
@@ -141,14 +144,12 @@ if uploaded:
         if not s or not duty_e:
             continue
 
-        # FDP length (last flown + 15m)
         if fdp_e:
             fdp_end = fdp_e + timedelta(minutes=15)
             if fdp_end < s:
                 fdp_end += timedelta(days=1)
             fdp.at[i, "FDP_min"] = (fdp_end - s).total_seconds() / 60.0
 
-        # Duty length (last duty end, includes positioning, NO +15m)
         if duty_e < s:
             duty_e += timedelta(days=1)
         fdp.at[i, "Duty_min"] = (duty_e - s).total_seconds() / 60.0
@@ -156,7 +157,7 @@ if uploaded:
     fdp["FDP_hrs"] = fdp["FDP_min"].apply(minutes_to_hours)
     fdp["Duty_hrs"] = fdp["Duty_min"].apply(minutes_to_hours)
 
-    # Turns (rest between duty periods)
+    # Turns
     fdp = fdp.sort_values(["Name", "Date", "duty_start", "duty_end"]).reset_index(drop=True)
     fdp["Turn_min"] = None
 
@@ -166,8 +167,7 @@ if uploaded:
                 prev_end = to_dt(fdp.loc[i-1, "Date"], fdp.loc[i-1, "duty_end"])
                 cur_start = to_dt(fdp.loc[i, "Date"], fdp.loc[i, "duty_start"])
                 if prev_end and cur_start:
-                    # Add 15m only if previous ended with flown flight FDP
-                    if fdp.loc[i-1, "fdp_end"]:
+                    if fdp.loc[i-1, "fdp_end"]:  # only add +15 if last duty was flown
                         prev_end += timedelta(minutes=15)
                     if cur_start < prev_end:
                         cur_start += timedelta(days=1)
@@ -185,12 +185,10 @@ if uploaded:
         duty_min = r["Duty_min"]
         turn_min = r["Turn_min"]
 
-        # FDP rules
         if fdp_min and fdp_min > 15*60:
             add_issue(r["Name"], r["Date"], "FDP >15h",
                       f"FDP {minutes_to_hours(fdp_min)}h")
 
-        # Duty >14h (positioning overage rule)
         if duty_min and duty_min > 14*60:
             excess = duty_min - 14*60
             required_rest = 10*60 + math.ceil(excess/2.0)
@@ -200,7 +198,6 @@ if uploaded:
                     add_issue(r["Name"], r["Date"], "Post-duty rest too short",
                               f"Duty {minutes_to_hours(duty_min)}h exceeded 14h by {minutes_to_hours(excess)}h → rest must be ≥{minutes_to_hours(required_rest)}h")
 
-        # Basic turn rule
         if turn_min and turn_min < 10*60:
             add_issue(r["Name"], r["Date"], "Turn <10h",
                       f"Turn {minutes_to_hours(turn_min)}h")
