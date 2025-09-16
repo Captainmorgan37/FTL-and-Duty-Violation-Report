@@ -6,7 +6,7 @@ import re
 from datetime import timedelta
 
 st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
-st.title("FTL Audit: Duty, Rest & 7d/30d Policy (Locked)")
+st.title("FTL Audit: Duty, Rest & 7d/30d Policy")
 
 st.markdown(
     "Upload the relevant CSV exports and the app will run three checks:"
