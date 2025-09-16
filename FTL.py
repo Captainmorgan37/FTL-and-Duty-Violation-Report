@@ -13,7 +13,7 @@ def excel_time_to_time(val):
     if pd.isna(val):
         return None
     if isinstance(val, pd.Timestamp):
-        if val.year == 1900:  # Excel dummy anchor
+        if val.year == 1900:  # Excel dummy anchor for times
             return time(val.hour, val.minute, val.second)
         return val.time()
     if isinstance(val, pd.Timedelta):
@@ -33,33 +33,52 @@ def excel_time_to_time(val):
     return None
 
 def excel_time_to_hours(val):
-    """Convert Excel-style hh:mm:ss, Timedelta, or day+time into float hours"""
+    """Convert Excel-style hh:mm:ss, Timedelta, or 1900-anchored datetime-with-days into float hours"""
     if pd.isna(val):
         return None
+
+    # Case 1: Excel serial datetime anchored near 1900-01-01
     if isinstance(val, pd.Timestamp):
-        return val.hour + val.minute/60 + val.second/3600
+        anchor = pd.Timestamp(1900, 1, 1)
+        try:
+            days = (val.normalize() - anchor).days
+            if days < 0 or days > 4000:  # If it's clearly a real date, ignore days
+                days = 0
+        except Exception:
+            days = 0
+        return days * 24.0 + val.hour + val.minute/60.0 + val.second/3600.0
+
+    # Case 2: True pandas Timedelta
     if isinstance(val, pd.Timedelta):
         return val.total_seconds() / 3600.0
+
+    # Case 3: String like "7 days 08:20:00" or "2 days"
     s = str(val).strip().lower()
     if "day" in s:
-        parts = s.replace("days", "").replace("day", "").strip().split()
-        days = int(parts[0])
-        hh, mm, ss = 0, 0, 0
-        if len(parts) > 1 and ":" in parts[1]:
-            tparts = [int(x) for x in parts[1].split(":")]
+        parts = s.replace("days", "day").split("day")
+        try:
+            days = int(parts[0].strip())
+        except:
+            days = 0
+        hh = mm = ss = 0
+        tail = parts[1].strip() if len(parts) > 1 else ""
+        if ":" in tail:
+            tparts = [int(x) for x in tail.split(":")]
             while len(tparts) < 3:
                 tparts.append(0)
-            hh, mm, ss = tparts
-        return days*24 + hh + mm/60 + ss/3600
+            hh, mm, ss = tparts[:3]
+        return days * 24.0 + hh + mm/60.0 + ss/3600.0
+
     if ":" in s:
         try:
             parts = [int(x) for x in s.split(":")]
             while len(parts) < 3:
                 parts.append(0)
-            hh, mm, ss = parts
-            return hh + mm/60 + ss/3600
+            hh, mm, ss = parts[:3]
+            return hh + mm/60.0 + ss/3600.0
         except:
             return None
+
     try:
         return float(s)
     except:
@@ -97,8 +116,13 @@ def parse_ftl_excel(file, sheet=0):
     for col in time_like_cols:
         df[col + "_t"] = df[col].apply(excel_time_to_time)
 
-    # Auto-detect rolling hour/duration cols
-    duration_cols = [c for c in df.columns if any(x in c.lower() for x in ["7d", "30d", "365d"])]
+    # Auto-detect rolling/duration columns
+    duration_keys = ["7d", "28d", "30d", "90d", "180d", "365d"]
+    duration_cols = [c for c in df.columns if any(key in c.lower() for key in duration_keys)]
+    duration_cols += [c for c in df.columns if pd.api.types.is_timedelta64_ns_dtype(df[c])]
+    seen = set()
+    duration_cols = [c for c in duration_cols if not (c in seen or seen.add(c))]
+
     for col in duration_cols:
         df["hrs_" + col] = df[col].apply(excel_time_to_hours)
 
@@ -135,6 +159,7 @@ def consolidate_fdps(ftl):
                 "fdp_end": None,
                 "duty_end": None,
                 "hrs7d": row.get("hrs_7d"),
+                "hrs28d": row.get("hrs_28d"),
                 "hrs30d": row.get("hrs_30d"),
                 "hrs365d": row.get("hrs_365d"),
             })
@@ -152,6 +177,7 @@ def consolidate_fdps(ftl):
                 "fdp_end": end_t,
                 "duty_end": end_t,
                 "hrs7d": row.get("hrs_7d"),
+                "hrs28d": row.get("hrs_28d"),
                 "hrs30d": row.get("hrs_30d"),
                 "hrs365d": row.get("hrs_365d"),
             }
@@ -164,6 +190,8 @@ def consolidate_fdps(ftl):
 
         if pd.notna(row.get("hrs_7d")):
             cur["hrs7d"] = row["hrs_7d"]
+        if pd.notna(row.get("hrs_28d")):
+            cur["hrs28d"] = row["hrs_28d"]
         if pd.notna(row.get("hrs_30d")):
             cur["hrs30d"] = row["hrs_30d"]
         if pd.notna(row.get("hrs_365d")):
@@ -182,10 +210,11 @@ uploaded = st.file_uploader("Upload FTL Excel Report", type=["xlsx", "csv"])
 
 if uploaded:
     ftl = parse_ftl_excel(uploaded)
-    
+
     # Debug view: only show parsed versions (_t and hrs_)
-    debug_cols = ["Name", "Date", "Date_parsed"] + \
-                 [c for c in ftl.columns if c.endswith("_t") or c.startswith("hrs_")]
+    debug_cols = ["Name", "Date", "Date_parsed"]
+    debug_cols += [c for c in ftl.columns if c.endswith("_t")]       # parsed times
+    debug_cols += [c for c in ftl.columns if c.startswith("hrs_")]   # parsed hours
     st.subheader("Parsed Data (debug)")
     st.dataframe(ftl[debug_cols].head(30), use_container_width=True)
 
@@ -217,6 +246,6 @@ if uploaded:
     fdp["Duty_hrs"] = fdp["Duty_min"].apply(lambda x: round(x/60, 2) if x else None)
 
     st.subheader("Consolidated FDPs (debug)")
-    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end", 
-                "FDP_hrs", "Duty_hrs", "hrs7d", "hrs30d", "hrs365d"]
+    dbg_cols = ["Name", "Date", "duty_start", "fdp_end", "duty_end",
+                "FDP_hrs", "Duty_hrs", "hrs7d", "hrs28d", "hrs30d", "hrs365d"]
     st.dataframe(fdp[dbg_cols], use_container_width=True)
