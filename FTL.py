@@ -7,7 +7,7 @@ def excel_time_to_time(val):
     if pd.isna(val):
         return None
     if isinstance(val, pd.Timestamp):
-        if val.year == 1900:
+        if val.year == 1900:  # Excel dummy anchor
             return time(val.hour, val.minute, val.second)
         return val.time()
     if isinstance(val, pd.Timedelta):
@@ -61,14 +61,12 @@ def parse_ftl_excel(path, sheet="Sheet1"):
     if "Date" in df.columns:
         df["Date_parsed"] = pd.to_datetime(df["Date"], format="%d.%m.%Y", errors="coerce").dt.date
 
-    # Auto-detect time-of-day columns
+    # Auto-detect time-like columns
     time_like_cols = []
     for col in df.columns:
-        # Skip known non-time columns
-        if col in ["Date", "Name"]: 
+        if col in ["Date", "Name"]:
             continue
-        # Check first 20 non-null values for a ":" or Timestamp
-        sample = df[col].dropna().head(20)
+        sample = df[col].dropna().head(10)
         if not sample.empty:
             if any(isinstance(v, (pd.Timestamp, pd.Timedelta)) for v in sample):
                 time_like_cols.append(col)
@@ -78,7 +76,7 @@ def parse_ftl_excel(path, sheet="Sheet1"):
     for col in time_like_cols:
         df[col + "_t"] = df[col].apply(excel_time_to_time)
 
-    # Auto-detect rolling/duration columns (7d, 30d, 365d, etc.)
+    # Auto-detect rolling hour/duration cols
     duration_cols = [c for c in df.columns if any(x in c.lower() for x in ["7d", "30d", "365d"])]
     for col in duration_cols:
         df["hrs_" + col] = df[col].apply(excel_time_to_hours)
