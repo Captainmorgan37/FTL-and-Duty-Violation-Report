@@ -186,13 +186,20 @@ if uploaded is not None:
         results_tab, debug_tab = st.tabs(["Results", "Debug"])
 
         with results_tab:
-            st.markdown("### Streaks (≥ 2 consecutive 12+ hr days)")
-            st.dataframe(seq2, use_container_width=True)
-            to_csv_download(seq2, "FTL_2x12hr_Consecutive_Summary.csv", key="dl_seq2")
+            # Banner for 3-day rule
+            if not seq3.empty:
+                pilots = sorted(seq3["Pilot"].unique().tolist())
+                st.error(f"⚠️ 3-day rule TRIGGERED: {len(pilots)} pilot(s) with ≥3 consecutive 12+ hr days: {', '.join(pilots)}")
+            else:
+                st.success("✅ No pilots with ≥3 consecutive 12+ hr days detected.")
 
             st.markdown("### Streaks (≥ 3 consecutive 12+ hr days)")
             st.dataframe(seq3, use_container_width=True)
             to_csv_download(seq3, "FTL_3x12hr_Consecutive_Summary.csv", key="dl_seq3")
+
+            st.markdown("### Streaks (≥ 2 consecutive 12+ hr days)")
+            st.dataframe(seq2, use_container_width=True)
+            to_csv_download(seq2, "FTL_2x12hr_Consecutive_Summary.csv", key="dl_seq2")
 
         with debug_tab:
             cov = coverage_table(work)
