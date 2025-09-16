@@ -48,13 +48,14 @@ def consolidate_fdps(ftl):
 
         sd_raw = str(row.get("Start Duty", "") or "")
         bo_raw = str(row.get("Blocks On", "") or "")
+        duty_raw = str(row.get("Duty", "") or "")
 
         start_t = row["StartDuty_t"]
         end_t = row["BlocksOn_t"]
 
-        # ✅ Only treat (split) as split
         is_split = "(split)" in sd_raw.lower()
         is_new_start = start_t is not None
+        is_positioning = duty_raw.strip().startswith("P ")
 
         if cur is None or name != cur["Name"]:
             if cur is not None:
@@ -63,7 +64,8 @@ def consolidate_fdps(ftl):
                 "Name": name,
                 "Date": date,
                 "duty_start": start_t,
-                "blocks_on": end_t,
+                "fdp_end": end_t if not is_positioning else None,   # track FDP end
+                "duty_end": end_t,                                  # duty always extends
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": False,
@@ -71,22 +73,15 @@ def consolidate_fdps(ftl):
             }
             continue
 
-        # ✅ Only trigger split when explicitly marked or a new start duty
         if is_split or is_new_start:
-            # calculate break
-            prev_end = to_dt(cur["Date"], cur["blocks_on"])
-            next_start = to_dt(date, start_t)
-            if prev_end and next_start:
-                if next_start < prev_end:
-                    next_start += timedelta(days=1)
-                cur["break_min"] = (next_start - prev_end).total_seconds() / 60.0
-
+            # finalize current FDP
             periods.append(cur)
             cur = {
                 "Name": name,
                 "Date": date,
                 "duty_start": start_t,
-                "blocks_on": end_t,
+                "fdp_end": end_t if not is_positioning else None,
+                "duty_end": end_t,
                 "hrs7d": row["hrs7d"],
                 "hrs30d": row["hrs30d"],
                 "split": is_split,
@@ -94,8 +89,12 @@ def consolidate_fdps(ftl):
             }
             continue
 
+        # Extend FDP end only with flown flights (not positioning)
         if end_t:
-            cur["blocks_on"] = end_t
+            cur["duty_end"] = end_t
+            if not is_positioning:
+                cur["fdp_end"] = end_t
+
         if pd.notna(row["hrs7d"]):
             cur["hrs7d"] = row["hrs7d"]
         if pd.notna(row["hrs30d"]):
@@ -105,6 +104,7 @@ def consolidate_fdps(ftl):
         periods.append(cur)
 
     return pd.DataFrame(periods)
+
 
 
 # ---------- File upload ----------
@@ -125,14 +125,48 @@ if uploaded:
     fdp=consolidate_fdps(ftl)
 
     # FDP length
-    fdp["FDP_min"]=None
-    for i,r in fdp.iterrows():
-        s=to_dt(r["Date"],r["duty_start"]); e=to_dt(r["Date"],r["blocks_on"])
-        if s and e:
-            e+=timedelta(minutes=15)
-            if e<s: e+=timedelta(days=1)
-            fdp.at[i,"FDP_min"]=(e-s).total_seconds()/60.0
-    fdp["FDP_hrs"]=fdp["FDP_min"].apply(minutes_to_hours)
+for i, r in fdp.iterrows():
+    s = to_dt(r["Date"], r["duty_start"])
+    fdp_e = to_dt(r["Date"], r["fdp_end"]) if r["fdp_end"] else None
+    duty_e = to_dt(r["Date"], r["duty_end"]) if r["duty_end"] else None
+
+    if not s or not duty_e:
+        continue
+
+    # FDP length (last flown block + 15m)
+    fdp_min = None
+    if fdp_e:
+        fdp_end = fdp_e + timedelta(minutes=15)
+        if fdp_end < s:
+            fdp_end += timedelta(days=1)
+        fdp_min = (fdp_end - s).total_seconds() / 60.0
+
+    # Duty length (last duty end, incl. positioning, NO +15m)
+    duty_end = duty_e
+    if duty_end < s:
+        duty_end += timedelta(days=1)
+    duty_min = (duty_end - s).total_seconds() / 60.0
+
+    # Store
+    fdp.at[i, "FDP_min"] = fdp_min
+    fdp.at[i, "Duty_min"] = duty_min
+
+    # FDP checks (normal rules)
+    if fdp_min and fdp_min > 15*60:
+        add_issue(r["Name"], r["Date"], "FDP >15h",
+                  f"FDP {minutes_to_hours(fdp_min)}h")
+
+    # Duty >14h → apply positioning rest extension rule
+    if duty_min > 14*60:
+        excess = duty_min - 14*60
+        required_rest = 10*60 + math.ceil(excess/2.0)
+        # look ahead to next turn
+        if i+1 < len(fdp) and fdp.loc[i+1, "Name"] == r["Name"]:
+            next_turn = fdp.loc[i+1, "Turn_min"]
+            if next_turn and next_turn < required_rest:
+                add_issue(r["Name"], r["Date"], "Post-duty rest too short",
+                          f"Duty {minutes_to_hours(duty_min)}h exceeded 14h by {minutes_to_hours(excess)}h → rest must be ≥{minutes_to_hours(required_rest)}h")
+
 
     # Turns
     fdp=fdp.sort_values(["Name","Date","duty_start","blocks_on"]).reset_index(drop=True)
