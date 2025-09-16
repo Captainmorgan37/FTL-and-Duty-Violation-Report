@@ -5,8 +5,8 @@ import numpy as np
 import re
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL: Locked 12+ Hour Duty Streak Checker", layout="wide")
-st.title("FTL: Locked 12+ Hour Duty Streak Checker")
+st.set_page_config(page_title="FTL: 12+ Hour Duty Streak Checker (Locked)", layout="wide")
+st.title("FTL: 12+ Hour Duty Streak Checker (Locked)")
 
 st.markdown(
     "Upload the FL3XX **Flight Time Limitations (FTL)** CSV export. "
@@ -154,9 +154,9 @@ def coverage_table(work):
     cov["LastDate"] = cov["LastDate"].dt.date
     return cov
 
-def to_csv_download(df, filename):
+def to_csv_download(df, filename, key=None):
     csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download " + filename, data=csv_bytes, file_name=filename, mime="text/csv")
+    st.download_button("Download " + filename, data=csv_bytes, file_name=filename, mime="text/csv", key=key)
 
 # -----------------------------
 # Main
@@ -180,26 +180,31 @@ if uploaded is not None:
         st.dataframe(diag, use_container_width=True)
     else:
         work = build_work_table(df.copy(), pilot_col, date_col, duty_col, min_hours=12.0)
-        cov = coverage_table(work)
-        st.markdown("### Per-Pilot Coverage")
-        st.dataframe(cov, use_container_width=True)
-        to_csv_download(cov, "FTL_Per_Pilot_Coverage.csv")
-
-        st.markdown("### Streaks (≥ 2 consecutive 12+ hr days)")
         seq2 = streaks(work, min_consecutive=2)
-        st.dataframe(seq2, use_container_width=True)
-        to_csv_download(seq2, "FTL_2x12hr_Consecutive_Summary.csv")
-
-        st.markdown("### Streaks (≥ 3 consecutive 12+ hr days)")
         seq3 = streaks(work, min_consecutive=3)
-        st.dataframe(seq3, use_container_width=True)
-        to_csv_download(seq3, "FTL_3x12hr_Consecutive_Summary.csv")
 
-        st.markdown("### Parsed Duty by Day (normalized)")
-        st.dataframe(work, use_container_width=True)
-        to_csv_download(work, "FTL_Duty_By_Day_Parsed.csv")
+        results_tab, debug_tab = st.tabs(["Results", "Debug"])
+
+        with results_tab:
+            st.markdown("### Streaks (≥ 2 consecutive 12+ hr days)")
+            st.dataframe(seq2, use_container_width=True)
+            to_csv_download(seq2, "FTL_2x12hr_Consecutive_Summary.csv", key="dl_seq2")
+
+            st.markdown("### Streaks (≥ 3 consecutive 12+ hr days)")
+            st.dataframe(seq3, use_container_width=True)
+            to_csv_download(seq3, "FTL_3x12hr_Consecutive_Summary.csv", key="dl_seq3")
+
+        with debug_tab:
+            cov = coverage_table(work)
+            st.markdown("### Per-Pilot Coverage")
+            st.dataframe(cov, use_container_width=True)
+            to_csv_download(cov, "FTL_Per_Pilot_Coverage.csv", key="dl_cov")
+
+            st.markdown("### Parsed Duty by Day (normalized)")
+            st.dataframe(work, use_container_width=True)
+            to_csv_download(work, "FTL_Duty_By_Day_Parsed.csv", key="dl_work")
 else:
     st.info("Upload the FTL CSV to begin.")
 
 st.markdown("---")
-st.caption("Note: Pilot names are forward-filled through blank rows until the next pilot header; dates parsed as day-first (DD/MM/YYYY).")
+st.caption("Debug-only tables are in the **Debug** tab. Pilot names are forward-filled; dates parsed as day-first (DD/MM/YYYY).")
