@@ -1,76 +1,79 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
 import re
+from datetime import timedelta, datetime
 
-# ------------------------- CONFIG -------------------------
-st.set_page_config(page_title="FTL & FDP Report", layout="wide")
+st.set_page_config(layout="wide")
 st.title("FTL Report Parser")
 
-# ------------------------- HELPERS -------------------------
-def excel_duration_to_hours(value):
-    if pd.isna(value):
-        return 0.0
-    if isinstance(value, str):
-        try:
-            tparts = [int(x) for x in value.strip().split(":")]
-            if len(tparts) == 3:
-                h, m, s = tparts
-            elif len(tparts) == 2:
-                h, m = tparts
-                s = 0
-            else:
-                return 0.0
+# ---------- Helpers ----------
+def excel_time_to_hours(val):
+    if pd.isna(val):
+        return 0
+    if isinstance(val, (int, float)):
+        # Excel serial time (fraction of a day)
+        return round(float(val) * 24, 2)
+    if isinstance(val, timedelta):
+        return round(val.total_seconds() / 3600, 2)
+    val = str(val).strip()
+    try:
+        # Match hh:mm:ss or hh:mm
+        if re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", val):
+            parts = val.split(":")
+            h = int(parts[0])
+            m = int(parts[1])
+            s = int(parts[2]) if len(parts) == 3 else 0
             return round(h + m/60 + s/3600, 2)
-        except:
-            return 0.0
-    elif isinstance(value, (float, int)):
-        return round(float(value) * 24, 2)
-    elif isinstance(value, pd.Timedelta):
-        return round(value.total_seconds() / 3600, 2)
-    return 0.0
+        # Match X days HH:MM:SS
+        days_match = re.match(r"(?:(\d+)\s+days?,?\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?", val)
+        if days_match:
+            d = int(days_match.group(1) or 0)
+            h = int(days_match.group(2) or 0)
+            m = int(days_match.group(3) or 0)
+            s = int(days_match.group(4) or 0)
+            return round(d * 24 + h + m/60 + s/3600, 2)
+    except:
+        pass
+    return 0
 
-# ------------------------- PARSER -------------------------
+# ---------- Main Parser ----------
 def parse_ftl_excel(file):
     xl = pd.ExcelFile(file)
-    frames = []
-    for sheet in xl.sheet_names:
-        df = xl.parse(sheet, dtype=str)
-        df["Sheet"] = sheet
-        frames.append(df)
-    df = pd.concat(frames, ignore_index=True)
+    sheet = xl.sheet_names[0]
+    df = xl.parse(sheet)
 
-    # Clean column names
-    stripped_cols = [str(c).strip() for c in df.columns]
-    seen = {}
-    deduped_cols = []
-    for col in stripped_cols:
-        if col not in seen:
-            seen[col] = 1
-            deduped_cols.append(col)
-        else:
-            seen[col] += 1
-            deduped_cols.append(f"{col}.{seen[col]-1}")
-    df.columns = deduped_cols
+    # Drop fully empty rows
+    df.dropna(how="all", inplace=True)
 
-    # Detect all potential time columns (string and Excel duration)
-    time_cols = [c for c in df.columns if re.search(r"(\d{1,3}d|\d{1,2}:\d{2}(:\d{2})?)", str(df[c].dropna().astype(str).iloc[0])) or "d" in c.lower()]
+    # Fix duplicate column names
+    df.columns = pd.io.parsers.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
 
+    # Find time-like columns by sampling first valid row
+    sample_row = df.dropna(how='all').head(1)
+    time_cols = []
+    for col in df.columns:
+        try:
+            cell = str(sample_row[col].values[0])
+            if re.search(r"\d{1,2}:\d{2}(:\d{2})?", cell) or 'd' in col.lower():
+                time_cols.append(col)
+        except:
+            continue
+
+    # Add parsed hour columns
     for col in time_cols:
-        df["hrs_" + col] = df[col].apply(excel_duration_to_hours)
+        df[f"hrs_{col}"] = df[col].apply(excel_time_to_hours)
 
     return df
 
-# ------------------------- MAIN APP -------------------------
-uploaded = st.file_uploader("Upload FTL Excel Report", type=["xlsx"])
+# ---------- Streamlit UI ----------
+uploaded = st.file_uploader("Upload FTL Excel Report", type=["xls", "xlsx"])
 if uploaded:
-    with st.spinner("Parsing report..."):
+    try:
         ftl = parse_ftl_excel(uploaded)
+        st.success("✅ FTL report parsed successfully!")
 
-    st.subheader("Full Parsed Data")
-    st.dataframe(ftl, use_container_width=True)
-
-    debug_cols = [c for c in ftl.columns if c.startswith("hrs_")]
-    if debug_cols:
-        st.subheader("Parsed Time Summary (in Hours)")
-        st.dataframe(ftl[debug_cols + ["Sheet"]], use_container_width=True)
+        # Show preview
+        debug_cols = [c for c in ftl.columns if "hrs_" in c or any(x in c.lower() for x in ["pilot", "date", "tail", "dep", "arr"])]
+        st.dataframe(ftl[debug_cols].head(30), use_container_width=True)
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
