@@ -5,11 +5,11 @@ import numpy as np
 import re
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy (Locked)", layout="wide")
+st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
 st.title("FTL Audit: Duty, Rest & 7d/30d Policy (Locked)")
 
 st.markdown(
-    "Upload the relevant CSV exports and the app will run three locked checks:"
+    "Upload the relevant CSV exports and the app will run three checks:"
     "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
     "\n2) **Short Rest**: ≥2 consecutive days with **rest < 11 hours** _(FTL CSV)_"
     "\n3) **7d/30d Policy + Detailed Duty Violations** _(Duty Violation CSV)_"
