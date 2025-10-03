@@ -297,10 +297,16 @@ def _coalesce_datetime_columns(df, primary_col, fallback_cols):
 
     series = parsed(primary_col)
     if fallback_cols:
-        combined = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        # Prefer the primary column values and only fall back when they're missing.
+        # Previously we let the fallback columns override the detected "Date"
+        # column which caused multi-leg duties (with different report times)
+        # to be split across multiple days even when the CSV already provided a
+        # single date value for the duty.  By combining the fallback values into
+        # the primary series instead of the other way around we preserve the
+        # duty-day date and only use begin/report timestamps when the primary
+        # column is blank.
         for col in fallback_cols:
-            combined = combined.combine_first(parsed(col))
-        series = combined.combine_first(series)
+            series = series.combine_first(parsed(col))
     return series
 
 
@@ -494,8 +500,13 @@ with tab_policy:
 
             # Aggregate conservative per date (min rest) and max rolling totals
             group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
-            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestAfter_act": "min"}
-            if "RestAfter_min" in work.columns: aggdict["RestAfter_min"] = "min"
+            # For rest-after values we want the overnight rest that follows the entire duty, not
+            # the shortest turn time that might appear on intermediate legs.  The last leg of a
+            # duty period carries the longest "Rest After" value, so we aggregate using "max"
+            # instead of "min" (which previously caused false short-rest violations when
+            # mid-duty turns were present in the source rows).
+            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestAfter_act": "max"}
+            if "RestAfter_min" in work.columns: aggdict["RestAfter_min"] = "max"
             if "RestBefore_act" in work.columns: aggdict["RestBefore_act"] = "min"
             if "RestBefore_min" in work.columns: aggdict["RestBefore_min"] = "min"
             if "FDP_act" in work.columns: aggdict["FDP_act"] = "max"
