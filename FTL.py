@@ -93,6 +93,22 @@ def infer_common_columns(df):
             date_col = c
             break
 
+    return pilot_col, date_col
+
+
+def infer_begin_end_columns(df, date_col=None):
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    parsed_cache = {}
+
+    def parsed_series(col):
+        if col is None or col not in df.columns:
+            return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        if col not in parsed_cache:
+            parsed_cache[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+        return parsed_cache[col]
+
     begin_cols = []
     end_cols = []
     for c in cols:
@@ -105,15 +121,11 @@ def infer_common_columns(df):
         elif re.search(r"(end|finish|release|off|arriv|complete)", lname):
             end_cols.append(c)
 
-    begin_cols = [c for c in begin_cols if c != date_col]
-    end_cols = [c for c in end_cols if c != date_col]
+    if date_col:
+        begin_cols = [c for c in begin_cols if c != date_col]
+        end_cols = [c for c in end_cols if c != date_col]
 
-    return {
-        "pilot_col": pilot_col,
-        "date_col": date_col,
-        "begin_cols": begin_cols,
-        "end_cols": end_cols,
-    }
+    return begin_cols, end_cols
 
 def infer_duty_column(df):
     cols = list(df.columns)
@@ -364,9 +376,8 @@ with tab_results:
         st.info("Upload the **FTL CSV** in the sidebar to run Duty Streaks and Short Rest checks.")
     else:
         df = try_read_csv(ftl_file)
-        common_cols = infer_common_columns(df.copy())
-        pilot_col = common_cols.get("pilot_col")
-        date_col = common_cols.get("date_col")
+        pilot_col, date_col = infer_common_columns(df.copy())
+        begin_cols, _ = infer_begin_end_columns(df.copy(), date_col=date_col)
 
         if not pilot_col or not date_col:
             st.error("Could not confidently identify common columns (Pilot, Date) in the FTL CSV.")
@@ -386,7 +397,7 @@ with tab_results:
                         date_col,
                         duty_col,
                         min_hours=12.0,
-                        begin_cols=common_cols.get("begin_cols"),
+                        begin_cols=begin_cols,
                     )
                     seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
                     seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
