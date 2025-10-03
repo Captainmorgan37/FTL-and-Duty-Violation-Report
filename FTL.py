@@ -56,7 +56,27 @@ def infer_common_columns(df):
     df.columns = cols
     pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
     pilot_col = pilot_candidates[0] if pilot_candidates else None
+
     date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
+    # Also consider columns that explicitly mention begin/start even if they lack "date"/"day"
+    date_candidates += [c for c in cols if re.search(r"(begin|start|report)", c, re.I)]
+    # Preserve first occurrence order while removing duplicates
+    seen = set()
+    date_candidates = [c for c in date_candidates if not (c in seen or seen.add(c))]
+
+    def date_score(name):
+        lname = name.lower()
+        score = 2
+        if re.search(r"(begin|start|report)", lname):
+            score = 0
+        elif re.search(r"(off|out|dep)", lname):
+            score = 1
+        if re.search(r"(end|arriv|finish|complete|in)", lname):
+            score += 3
+        return score, cols.index(name)
+
+    date_candidates = sorted(date_candidates, key=date_score)
+
     date_col = None
     for c in date_candidates:
         parsed = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
