@@ -57,6 +57,15 @@ def infer_common_columns(df):
     pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
     pilot_col = pilot_candidates[0] if pilot_candidates else None
 
+    parsed_cache = {}
+
+    def parsed_series(col):
+        if col is None or col not in df.columns:
+            return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        if col not in parsed_cache:
+            parsed_cache[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+        return parsed_cache[col]
+
     date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
     # Also consider columns that explicitly mention begin/start even if they lack "date"/"day"
     date_candidates += [c for c in cols if re.search(r"(begin|start|report)", c, re.I)]
@@ -71,6 +80,7 @@ def infer_common_columns(df):
             score = 0
         elif re.search(r"(off|out|dep)", lname):
             score = 1
+        if re.search(r"(end|arriv|finish|complete|in|release)", lname):
         if re.search(r"(end|arriv|finish|complete|in)", lname):
             score += 3
         return score, cols.index(name)
@@ -79,11 +89,44 @@ def infer_common_columns(df):
 
     date_col = None
     for c in date_candidates:
-        parsed = pd.to_datetime(df[c], errors="coerce", dayfirst=True)
+        parsed = parsed_series(c)
         if parsed.notna().mean() > 0.5:
             date_col = c
             break
+
     return pilot_col, date_col
+
+
+def infer_begin_end_columns(df, date_col=None):
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    parsed_cache = {}
+
+    def parsed_series(col):
+        if col is None or col not in df.columns:
+            return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        if col not in parsed_cache:
+            parsed_cache[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+        return parsed_cache[col]
+
+    begin_cols = []
+    end_cols = []
+    for c in cols:
+        lname = c.lower()
+        parsed = parsed_series(c)
+        if parsed.notna().mean() <= 0.2:
+            continue
+        if re.search(r"(begin|start|report|sign\s*in|show)", lname):
+            begin_cols.append(c)
+        elif re.search(r"(end|finish|release|off|arriv|complete)", lname):
+            end_cols.append(c)
+
+    if date_col:
+        begin_cols = [c for c in begin_cols if c != date_col]
+        end_cols = [c for c in end_cols if c != date_col]
+
+    return begin_cols, end_cols
 
 def infer_duty_column(df):
     cols = list(df.columns)
@@ -243,22 +286,63 @@ def streaks(df, flag_col, min_consecutive=3):
         columns=["Pilot", "StartDate", "EndDate", "ConsecutiveDays"]
     )
 
-def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0):
+def _coalesce_datetime_columns(df, primary_col, fallback_cols):
+    parsed_cache = {}
+
+    def parsed(col):
+        if col is None or col not in df.columns:
+            return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        if col not in parsed_cache:
+            parsed_cache[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+        return parsed_cache[col]
+
+    series = parsed(primary_col)
+    if fallback_cols:
+        combined = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        for col in fallback_cols:
+            combined = combined.combine_first(parsed(col))
+        series = combined.combine_first(series)
+    return series
+
+
+def _normalize_dates(series):
+    if series.empty:
+        return series
+    dtype = series.dtype
+    if hasattr(dtype, "tz") and dtype.tz is not None:
+        try:
+            series = series.dt.tz_convert(None)
+        except TypeError:
+            series = series.dt.tz_localize(None)
+    return series.dt.floor("D")
+
+
+def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_cols=None):
+    df = df.copy()
     df[pilot_col] = df[pilot_col].ffill()
-    work = df[[pilot_col, date_col, duty_col]].copy()
-    work.columns = ["Pilot", "Date", "DutyRaw"]
-    work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
+
+    begin_cols = begin_cols or []
+    date_series = _coalesce_datetime_columns(df, date_col, begin_cols)
+
+    work = pd.DataFrame({
+        "Pilot": df[pilot_col],
+        "Date": date_series,
+        "DutyRaw": df[duty_col],
+    })
+
     work["DutyHours"] = work["DutyRaw"].map(parse_duration_to_hours)
     work = work.dropna(subset=["Pilot", "Date", "DutyHours"])
+    work["Date"] = _normalize_dates(work["Date"])
     work = work.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["DutyHours"].max()
     work["LongDuty"] = work["DutyHours"] >= float(min_hours)
     return work
 
 def build_rest_table(df, pilot_col, date_col, rest_col, short_thresh=11.0):
+    df = df.copy()
     df[pilot_col] = df[pilot_col].ffill()
     rest = df[[pilot_col, date_col, rest_col]].copy()
     rest.columns = ["Pilot", "Date", "RestRaw"]
-    rest["Date"] = pd.to_datetime(rest["Date"], errors="coerce", dayfirst=True)
+    rest["Date"] = _normalize_dates(pd.to_datetime(rest["Date"], errors="coerce", dayfirst=True))
     rest["RestHours"] = rest["RestRaw"].map(parse_duration_to_hours)
     rest = rest.dropna(subset=["Pilot", "Date", "RestHours"])
     rest = rest.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["RestHours"].min()
@@ -294,6 +378,7 @@ with tab_results:
     else:
         df = try_read_csv(ftl_file)
         pilot_col, date_col = infer_common_columns(df.copy())
+        begin_cols, _ = infer_begin_end_columns(df.copy(), date_col=date_col)
 
         if not pilot_col or not date_col:
             st.error("Could not confidently identify common columns (Pilot, Date) in the FTL CSV.")
@@ -307,7 +392,14 @@ with tab_results:
             else:
                 duty_work = None; rest_work = None
                 if duty_col:
-                    duty_work = build_duty_table(df.copy(), pilot_col, date_col, duty_col, min_hours=12.0)
+                    duty_work = build_duty_table(
+                        df.copy(),
+                        pilot_col,
+                        date_col,
+                        duty_col,
+                        min_hours=12.0,
+                        begin_cols=begin_cols,
+                    )
                     seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
                     seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
                 if rest_col:
