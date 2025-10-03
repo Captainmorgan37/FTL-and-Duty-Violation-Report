@@ -81,7 +81,6 @@ def infer_common_columns(df):
         elif re.search(r"(off|out|dep)", lname):
             score = 1
         if re.search(r"(end|arriv|finish|complete|in|release)", lname):
-        if re.search(r"(end|arriv|finish|complete|in)", lname):
             score += 3
         return score, cols.index(name)
 
