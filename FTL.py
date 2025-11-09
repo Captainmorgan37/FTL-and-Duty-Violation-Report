@@ -558,6 +558,19 @@ with tab_policy:
 
             work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestAfter_act"])
 
+            # Preserve row-level view for consecutive rest pairing before we aggregate
+            short_rest_rows = None
+            if "RestBefore_act" in work.columns:
+                short_rest_rows = work.dropna(subset=["RestBefore_act", "RestAfter_act"]).copy()
+                if "Date" in short_rest_rows.columns:
+                    # Present a date-only column for readability while keeping the original timestamp
+                    try:
+                        short_rest_rows["DutyDate"] = pd.to_datetime(short_rest_rows["Date"], errors="coerce", dayfirst=True).dt.date
+                    except Exception:
+                        short_rest_rows["DutyDate"] = pd.NaT
+            else:
+                short_rest_rows = None
+
             # Aggregate conservative per date (min rest) and max rolling totals
             group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
             # For rest-after values we want the overnight rest that follows the entire duty, not
@@ -648,20 +661,42 @@ with tab_policy:
                 st.info("FDP (act/max) columns not found; skipping that check.")
 
             # Consecutive short rest (Rest Before & Rest After both < 11h)
-            if "RestBefore_act" in work.columns:
-                short_both = work.dropna(subset=["RestAfter_act", "RestBefore_act"]).copy()
-                short_both = short_both[
-                    (short_both["RestAfter_act"] < 11.0) & (short_both["RestBefore_act"] < 11.0)
-                ]
-                if not short_both.empty:
+            if "RestBefore_act" in work.columns and short_rest_rows is not None:
+                short_both = short_rest_rows[
+                    (short_rest_rows["RestAfter_act"] < 11.0) & (short_rest_rows["RestBefore_act"] < 11.0)
+                ].copy()
+
+                if "DutyDate" in short_both.columns:
+                    display_cols = ["Pilot", "DutyDate"]
+                elif "Date" in short_both.columns:
+                    display_cols = ["Pilot", "Date"]
+                else:
+                    display_cols = ["Pilot"]
+
+                for extra_col in [
+                    "RestBefore_act",
+                    "RestAfter_act",
+                    "RestBefore_min",
+                    "RestAfter_min",
+                    "Hours7d",
+                    "Hours30d",
+                    "FDP_act",
+                    "FDP_max",
+                ]:
+                    if extra_col in short_both.columns:
+                        display_cols.append(extra_col)
+
+                short_both_display = short_both[display_cols].sort_values(display_cols[:2]) if len(display_cols) >= 2 else short_both[display_cols]
+
+                if not short_both_display.empty:
                     st.error(
-                        f"⚠️ Consecutive short rest: {len(short_both)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
+                        f"⚠️ Consecutive short rest: {len(short_both_display)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
                     )
                 else:
                     st.success("✅ No consecutive short rest (Rest Before & Rest After FDP act < 11 h) found.")
                 st.markdown("**Rest Before & Rest After FDP (act) both < 11 h**")
-                st.dataframe(short_both, use_container_width=True)
-                to_csv_download(short_both, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
+                st.dataframe(short_both_display, use_container_width=True)
+                to_csv_download(short_both_display, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
             else:
                 st.info("Rest Before FDP (act) column not found; skipping consecutive short rest check.")
 
