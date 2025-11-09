@@ -5,6 +5,40 @@ import numpy as np
 import re
 from datetime import timedelta
 
+
+REST_AFTER_ACT_PATTERNS = [
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\(act\)",
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\bact\b",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\(act\)",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\bact\b",
+    r"\bTurn\s*Time\s*After\b.*\(act\)",
+    r"\bTurn\s*Time\s*After\b.*\bact\b",
+]
+REST_AFTER_MIN_PATTERNS = [
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\(min\)",
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\bmin\b",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\(min\)",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\bmin\b",
+    r"\bTurn\s*Time\s*After\b.*\(min\)",
+    r"\bTurn\s*Time\s*After\b.*\bmin\b",
+]
+REST_BEFORE_ACT_PATTERNS = [
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\(act\)",
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\bact\b",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\(act\)",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\bact\b",
+    r"\bTurn\s*Time\s*Before\b.*\(act\)",
+    r"\bTurn\s*Time\s*Before\b.*\bact\b",
+]
+REST_BEFORE_MIN_PATTERNS = [
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\(min\)",
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\bmin\b",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\(min\)",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\bmin\b",
+    r"\bTurn\s*Time\s*Before\b.*\(min\)",
+    r"\bTurn\s*Time\s*Before\b.*\bmin\b",
+]
+
 st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
 st.title("FTL Audit: Duty, Rest & 7d/30d Policy")
 
@@ -171,32 +205,6 @@ def infer_duty_day_boundary_column(df):
     boundary_candidates.sort(key=lambda x: (-x[1], cols.index(x[0])))
     return boundary_candidates[0][0]
 
-def infer_rest_column_ftl(df):
-    cols = list(df.columns)
-    rest_candidates = []
-    rest_candidates += [c for c in cols if re.search(r"\brest\b", c, re.I)]
-    rest_candidates += [c for c in cols if re.search(r"(assumed|deemed).*\brest\b", c, re.I)]
-    rest_candidates += [c for c in cols if re.search(r"\b(min|minimum)\s*rest\b", c, re.I)]
-    rest_candidates += [c for c in cols if re.search(r"rest.*(time|duration|hrs|hours)", c, re.I)]
-    seen = set(); rest_candidates = [x for x in rest_candidates if not (x in seen or seen.add(x))]
-    rest_col = None; best_rate = -1.0
-    for c in rest_candidates:
-        sample = df[c].astype(str).head(300).tolist()
-        parsed = [parse_duration_to_hours(x) for x in sample]
-        rate = np.mean([not pd.isna(x) for x in parsed])
-        plausible = [x for x in parsed if not pd.isna(x) and 0 < x <= 48.0]
-        if rate > best_rate and (rate > 0.25 or len(plausible) >= 10):
-            best_rate = rate; rest_col = c
-    if rest_col is None:
-        for c in cols:
-            sample = df[c].astype(str).head(600).tolist()
-            parsed = pd.Series([parse_duration_to_hours(x) for x in sample])
-            if parsed.notna().mean() > 0.4:
-                med = parsed.dropna()
-                if not med.empty and 4 <= med.median() <= 24:
-                    rest_col = c
-                    break
-    return rest_col
 
 # ---------- Column inference (Duty Violation CSV) with robust Before/After ----------
 def infer_policy_columns(dv_df):
@@ -215,28 +223,6 @@ def infer_policy_columns(dv_df):
     c7 = c7_candidates[0] if c7_candidates else None
     c30 = c30_candidates[0] if c30_candidates else None
 
-    # Rest After / Before (act/min) — robust patterns
-    after_patterns_act = [
-        r"\bRest\s*After\s*(FDP|Duty)\b.*\(act\)",
-        r"\b(Post|Following)\b.*(FDP|Duty).*\(act\)",
-        r"\bTurn\s*Time\s*After\b.*\(act\)"
-    ]
-    after_patterns_min = [
-        r"\bRest\s*After\s*(FDP|Duty)\b.*\(min\)",
-        r"\b(Post|Following)\b.*(FDP|Duty).*\(min\)",
-        r"\bTurn\s*Time\s*After\b.*\(min\)"
-    ]
-    before_patterns_act = [
-        r"\bRest\s*Before\s*(FDP|Duty)\b.*\(act\)",
-        r"\b(Pre|Prior)\b.*(FDP|Duty).*\(act\)",
-        r"\bTurn\s*Time\s*Before\b.*\(act\)"
-    ]
-    before_patterns_min = [
-        r"\bRest\s*Before\s*(FDP|Duty)\b.*\(min\)",
-        r"\b(Pre|Prior)\b.*(FDP|Duty).*\(min\)",
-        r"\bTurn\s*Time\s*Before\b.*\(min\)"
-    ]
-
     def find_col(patterns, exclude=None):
         for pat in patterns:
             for c in cols:
@@ -246,16 +232,16 @@ def infer_policy_columns(dv_df):
                     return c
         return None
 
-    rest_after_act = find_col(after_patterns_act)
-    rest_after_min = find_col(after_patterns_min)
-    rest_before_act = find_col(before_patterns_act, exclude=rest_after_act)
-    rest_before_min = find_col(before_patterns_min, exclude=rest_after_min)
+    rest_after_act = find_col(REST_AFTER_ACT_PATTERNS)
+    rest_after_min = find_col(REST_AFTER_MIN_PATTERNS)
+    rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
+    rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
 
     # Guard: ensure distinct matches
     if rest_before_act == rest_after_act:
-        rest_before_act = find_col(before_patterns_act, exclude=rest_after_act)
+        rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
     if rest_before_min == rest_after_min:
-        rest_before_min = find_col(before_patterns_min, exclude=rest_after_min)
+        rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
 
     # FDP act/max
     fdp_act = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(act\)|\bFDP\b.*\(act\)", c, re.I)), None)
@@ -419,17 +405,73 @@ def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_co
     work["LongDuty"] = work["DutyHours"] >= float(min_hours)
     return work
 
-def build_rest_table(df, pilot_col, date_col, rest_col, short_thresh=11.0):
-    df = df.copy()
-    df[pilot_col] = df[pilot_col].ffill()
-    rest = df[[pilot_col, date_col, rest_col]].copy()
-    rest.columns = ["Pilot", "Date", "RestRaw"]
-    rest["Date"] = _normalize_dates(pd.to_datetime(rest["Date"], errors="coerce", dayfirst=True))
-    rest["RestHours"] = rest["RestRaw"].map(parse_duration_to_hours)
-    rest = rest.dropna(subset=["Pilot", "Date", "RestHours"])
-    rest = rest.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["RestHours"].min()
-    rest["ShortRest"] = rest["RestHours"] < float(short_thresh)
-    return rest
+
+def infer_rest_pair_columns_ftl(df):
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    def find_col(patterns, exclude=None):
+        for pat in patterns:
+            for c in cols:
+                if exclude and c == exclude:
+                    continue
+                if re.search(pat, c, re.I):
+                    return c
+        return None
+
+    rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS)
+    rest_after_act = find_col(REST_AFTER_ACT_PATTERNS)
+
+    if rest_before_act == rest_after_act:
+        rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
+    if rest_after_act == rest_before_act:
+        rest_after_act = find_col(REST_AFTER_ACT_PATTERNS, exclude=rest_before_act)
+
+    return rest_before_act, rest_after_act
+
+
+def build_consecutive_short_rest_rows(df, pilot_col, date_col, rest_before_col, rest_after_col, short_thresh=11.0):
+    work = df[[pilot_col, date_col, rest_before_col, rest_after_col]].copy()
+    work.columns = ["Pilot", "DateRaw", "RestBeforeRaw", "RestAfterRaw"]
+    work["Pilot"] = work["Pilot"].ffill()
+
+    if date_col:
+        work["DutyDate"] = pd.to_datetime(work["DateRaw"], errors="coerce", dayfirst=True)
+    else:
+        work["DutyDate"] = pd.NaT
+
+    p = parse_duration_to_hours
+    work["RestBeforeHours"] = work["RestBeforeRaw"].map(p)
+    work["RestAfterHours"] = work["RestAfterRaw"].map(p)
+    work = work.dropna(subset=["Pilot", "RestBeforeHours", "RestAfterHours"])
+
+    if date_col:
+        work = work.dropna(subset=["DutyDate"])
+
+    if not work.empty:
+        group_keys = ["Pilot"] + (["DutyDate"] if date_col else [])
+        aggdict = {"RestBeforeHours": "min", "RestAfterHours": "max"}
+        grouped = work.groupby(group_keys, as_index=False).agg(aggdict)
+    else:
+        grouped = work
+
+    grouped["BothShort"] = (grouped["RestBeforeHours"] < float(short_thresh)) & (
+        grouped["RestAfterHours"] < float(short_thresh)
+    )
+
+    flagged = grouped[grouped["BothShort"]].copy()
+    if date_col and "DutyDate" in flagged.columns:
+        flagged["DutyDate"] = flagged["DutyDate"].dt.date
+
+    flagged = flagged.drop(columns=["BothShort"], errors="ignore")
+    flagged = flagged.rename(columns={
+        "RestBeforeHours": "RestBefore_act (hrs)",
+        "RestAfterHours": "RestAfter_act (hrs)",
+    })
+    for col in ["RestBefore_act (hrs)", "RestAfter_act (hrs)"]:
+        if col in flagged.columns:
+            flagged[col] = flagged[col].round(2)
+    return flagged.sort_values(["Pilot"] + (["DutyDate"] if "DutyDate" in flagged.columns else []))
 
 def coverage_table(df, flag_col_name):
     cov = df.groupby("Pilot").agg(
@@ -496,10 +538,38 @@ with tab_results:
                 if duty_work is not None:
                     to_csv_download(seq3_duty, "FTL_3x12hr_Consecutive_Duty_Summary.csv", key="dl_duty3")
 
-                st.markdown("**≥ 2 consecutive 12+ hr duty days**")
-                st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
-                if duty_work is not None:
-                    to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
+                with st.expander("≥ 2 consecutive 12+ hr duty days", expanded=False):
+                    st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
+                    if duty_work is not None:
+                        to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
+
+                rest_pairs = pd.DataFrame()
+                rest_before_col, rest_after_col = infer_rest_pair_columns_ftl(df.copy())
+                if rest_before_col and rest_after_col and date_col:
+                    rest_pairs = build_consecutive_short_rest_rows(
+                        df.copy(),
+                        pilot_col,
+                        date_col,
+                        rest_before_col,
+                        rest_after_col,
+                        short_thresh=11.0,
+                    )
+
+                st.markdown("**Consecutive minimum rest (< 11 h) periods**")
+                if rest_before_col and rest_after_col:
+                    st.caption(f"Columns used: '{rest_before_col}' + '{rest_after_col}'")
+                if not date_col:
+                    st.info("Could not identify the duty date column in the FTL CSV to evaluate consecutive minimum rests.")
+                elif not (rest_before_col and rest_after_col):
+                    st.info("Could not locate both 'Rest Before FDP (act)' and 'Rest After FDP (act)' columns in the FTL CSV.")
+                elif rest_pairs.empty:
+                    st.success("✅ No pilots with consecutive minimum rest (< 11 h) periods detected.")
+                    st.dataframe(pd.DataFrame(), use_container_width=True)
+                else:
+                    pilots = sorted(rest_pairs["Pilot"].unique().tolist())
+                    st.error(f"⚠️ Consecutive minimum rest triggered for {len(pilots)} pilot(s): {', '.join(pilots)}")
+                    st.dataframe(rest_pairs, use_container_width=True)
+                    to_csv_download(rest_pairs, "FTL_consecutive_min_rest_summary.csv", key="dl_rest_consecutive")
 
 with tab_policy:
     if dv_file is None:
