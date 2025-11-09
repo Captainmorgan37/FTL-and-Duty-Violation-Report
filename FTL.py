@@ -666,6 +666,24 @@ with tab_policy:
             else:
                 st.info("FDP (act/max) columns not found; skipping that check.")
 
+            # Consecutive short rest (Rest Before & Rest After both < 11h)
+            if "RestBefore_act" in work.columns:
+                short_both = work.dropna(subset=["RestAfter_act", "RestBefore_act"]).copy()
+                short_both = short_both[
+                    (short_both["RestAfter_act"] < 11.0) & (short_both["RestBefore_act"] < 11.0)
+                ]
+                if not short_both.empty:
+                    st.error(
+                        f"⚠️ Consecutive short rest: {len(short_both)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
+                    )
+                else:
+                    st.success("✅ No consecutive short rest (Rest Before & Rest After FDP act < 11 h) found.")
+                st.markdown("**Rest Before & Rest After FDP (act) both < 11 h**")
+                st.dataframe(short_both, use_container_width=True)
+                to_csv_download(short_both, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
+            else:
+                st.info("Rest Before FDP (act) column not found; skipping consecutive short rest check.")
+
             # Full export
             to_csv_download(work, "DutyViolation_with_Rest_and_DetailedChecks.csv", key="dl_all")
 
