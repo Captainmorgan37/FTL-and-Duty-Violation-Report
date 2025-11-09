@@ -8,23 +8,35 @@ from datetime import timedelta
 
 REST_AFTER_ACT_PATTERNS = [
     r"\bRest\s*After\s*(FDP|Duty)\b.*\(act\)",
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\bact\b",
     r"\b(Post|Following)\b.*(FDP|Duty).*\(act\)",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\bact\b",
     r"\bTurn\s*Time\s*After\b.*\(act\)",
+    r"\bTurn\s*Time\s*After\b.*\bact\b",
 ]
 REST_AFTER_MIN_PATTERNS = [
     r"\bRest\s*After\s*(FDP|Duty)\b.*\(min\)",
+    r"\bRest\s*After\s*(FDP|Duty)\b.*\bmin\b",
     r"\b(Post|Following)\b.*(FDP|Duty).*\(min\)",
+    r"\b(Post|Following)\b.*(FDP|Duty).*\bmin\b",
     r"\bTurn\s*Time\s*After\b.*\(min\)",
+    r"\bTurn\s*Time\s*After\b.*\bmin\b",
 ]
 REST_BEFORE_ACT_PATTERNS = [
     r"\bRest\s*Before\s*(FDP|Duty)\b.*\(act\)",
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\bact\b",
     r"\b(Pre|Prior)\b.*(FDP|Duty).*\(act\)",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\bact\b",
     r"\bTurn\s*Time\s*Before\b.*\(act\)",
+    r"\bTurn\s*Time\s*Before\b.*\bact\b",
 ]
 REST_BEFORE_MIN_PATTERNS = [
     r"\bRest\s*Before\s*(FDP|Duty)\b.*\(min\)",
+    r"\bRest\s*Before\s*(FDP|Duty)\b.*\bmin\b",
     r"\b(Pre|Prior)\b.*(FDP|Duty).*\(min\)",
+    r"\b(Pre|Prior)\b.*(FDP|Duty).*\bmin\b",
     r"\bTurn\s*Time\s*Before\b.*\(min\)",
+    r"\bTurn\s*Time\s*Before\b.*\bmin\b",
 ]
 
 st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
