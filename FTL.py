@@ -496,10 +496,40 @@ with tab_results:
                 if duty_work is not None:
                     to_csv_download(seq3_duty, "FTL_3x12hr_Consecutive_Duty_Summary.csv", key="dl_duty3")
 
-                st.markdown("**≥ 2 consecutive 12+ hr duty days**")
-                st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
-                if duty_work is not None:
-                    to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
+                with st.expander("≥ 2 consecutive 12+ hr duty days", expanded=False):
+                    st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
+                    if duty_work is not None:
+                        to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
+
+                rest_sequences = pd.DataFrame()
+                rest_work = None
+                rest_col = infer_rest_column_ftl(df.copy())
+                if rest_col and date_col:
+                    rest_work = build_rest_table(
+                        df.copy(),
+                        pilot_col,
+                        date_col,
+                        rest_col,
+                        short_thresh=11.0,
+                    )
+                    if not rest_work.empty:
+                        rest_sequences = streaks(rest_work, "ShortRest", min_consecutive=2)
+
+                st.markdown("**Consecutive minimum rest (< 11 h) periods**")
+                if rest_col is None or not date_col:
+                    st.info("Could not identify the required Rest/Date columns in the FTL CSV to evaluate consecutive minimum rests.")
+                elif rest_work is None or rest_work.empty:
+                    st.success("✅ No qualifying rest periods found in the FTL CSV.")
+                    st.dataframe(pd.DataFrame(), use_container_width=True)
+                else:
+                    if not rest_sequences.empty:
+                        pilots = sorted(rest_sequences["Pilot"].unique().tolist())
+                        st.error(f"⚠️ Consecutive minimum rest triggered for {len(pilots)} pilot(s): {', '.join(pilots)}")
+                    else:
+                        st.success("✅ No pilots with consecutive minimum rest (< 11 h) periods detected.")
+
+                    st.dataframe(rest_sequences, use_container_width=True)
+                    to_csv_download(rest_sequences, "FTL_consecutive_min_rest_summary.csv", key="dl_rest_consecutive")
 
 with tab_policy:
     if dv_file is None:
