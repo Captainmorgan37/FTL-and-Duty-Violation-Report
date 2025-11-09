@@ -22,6 +22,9 @@ def parse_duration_to_hours(val):
     if pd.isna(val): return np.nan
     s = str(val).strip()
     if s == "": return np.nan
+    # Remove parenthetical annotations such as "(split duty)" that can appear
+    # alongside the duration values so they don't interfere with parsing.
+    s = re.sub(r"\([^)]*\)", "", s)
     s = s.replace("hours", ":").replace("hour", ":").replace("H", ":").replace("h", ":")
     s = s.replace(" ", "").replace("::", ":").replace(".", ":")
     m = re.match(r"^(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?$", s)
@@ -148,6 +151,25 @@ def infer_duty_column(df):
             if rate > 0.4 and len(plausible) >= 10:
                 duty_col = c; break
     return duty_col
+
+def infer_duty_day_boundary_column(df):
+    cols = list(df.columns)
+    boundary_candidates = []
+    for c in cols:
+        series = df[c]
+        if series.dtype.kind not in ("O", "U", "S") and not pd.api.types.is_string_dtype(series):
+            continue
+        values = series.astype(str).str.strip()
+        mask = values.str.contains(r"\brest\b", case=False, na=False)
+        if mask.sum() == 0:
+            continue
+        # We prefer columns that predominantly contain textual markers ("Rest")
+        if (mask.sum() >= 3) or (mask.mean() >= 0.01):
+            boundary_candidates.append((c, mask.sum()))
+    if not boundary_candidates:
+        return None
+    boundary_candidates.sort(key=lambda x: (-x[1], cols.index(x[0])))
+    return boundary_candidates[0][0]
 
 def infer_rest_column_ftl(df):
     cols = list(df.columns)
@@ -322,9 +344,10 @@ def _normalize_dates(series):
     return series.dt.floor("D")
 
 
-def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_cols=None):
+def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_cols=None, end_marker_col=None):
     df = df.copy()
     df[pilot_col] = df[pilot_col].ffill()
+    df["__row_order"] = np.arange(len(df))
 
     begin_cols = begin_cols or []
     date_series = _coalesce_datetime_columns(df, date_col, begin_cols)
@@ -334,23 +357,65 @@ def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_co
         fallback_begin = begin_cols[1:]
         begin_series = _coalesce_datetime_columns(df, primary_begin, fallback_begin)
 
-    work = pd.DataFrame({
-        "Pilot": df[pilot_col],
-        "Date": date_series,
-        "DutyRaw": df[duty_col],
-    })
-
-    work["DutyHours"] = work["DutyRaw"].map(parse_duration_to_hours)
-    work = work.dropna(subset=["Pilot", "Date", "DutyHours"])
-    work["Date"] = _normalize_dates(work["Date"])
+    df["__date"] = date_series
+    df["__normalized_date"] = _normalize_dates(df["__date"])
     if begin_series is not None:
         begin_series = _normalize_dates(begin_series)
         # Prefer the duty start/report date when available so that duties that
         # cross midnight remain associated with the calendar day on which they
         # began instead of appearing as duplicate long-duty days on the
         # following date.
-        work["Date"] = begin_series.combine_first(work["Date"])
-    work = work.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["DutyHours"].max()
+        df["__normalized_date"] = begin_series.combine_first(df["__normalized_date"])
+
+    df["__duty_hours"] = df[duty_col].map(parse_duration_to_hours)
+
+    use_marker = end_marker_col and end_marker_col in df.columns
+    if use_marker:
+        marker_series = df[end_marker_col].astype(str).str.strip()
+        df["__duty_boundary"] = marker_series.str.contains(r"\brest\b", case=False, na=False)
+
+    if use_marker:
+        records = []
+        for pilot, sub in df.groupby(pilot_col):
+            sub = sub.sort_values(["__normalized_date", "__row_order"])
+            current_start = None
+            collected_hours = []
+            for _, row in sub.iterrows():
+                duty_date = row["__normalized_date"]
+                if pd.isna(duty_date):
+                    continue
+                if current_start is None:
+                    current_start = duty_date
+                if not pd.isna(row["__duty_hours"]):
+                    collected_hours.append(row["__duty_hours"])
+                if row.get("__duty_boundary", False):
+                    if collected_hours:
+                        total_hours = max(collected_hours)
+                    else:
+                        total_hours = row["__duty_hours"]
+                    if not pd.isna(total_hours) and current_start is not None:
+                        records.append({"Pilot": pilot, "Date": current_start, "DutyHours": float(total_hours)})
+                    current_start = None
+                    collected_hours = []
+            if current_start is not None and collected_hours:
+                total_hours = max(collected_hours)
+                if not pd.isna(total_hours):
+                    records.append({"Pilot": pilot, "Date": current_start, "DutyHours": float(total_hours)})
+        work = pd.DataFrame(records, columns=["Pilot", "Date", "DutyHours"])
+        if work.empty:
+            use_marker = False
+    if not use_marker:
+        work = pd.DataFrame({
+            "Pilot": df[pilot_col],
+            "Date": df["__normalized_date"],
+            "DutyHours": df["__duty_hours"],
+        })
+    work = work.dropna(subset=["Pilot", "Date", "DutyHours"])
+    if not work.empty:
+        work["Date"] = _normalize_dates(pd.to_datetime(work["Date"], errors="coerce"))
+        work = work.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["DutyHours"].max()
+    else:
+        work = pd.DataFrame(columns=["Pilot", "Date", "DutyHours"])
     work["LongDuty"] = work["DutyHours"] >= float(min_hours)
     return work
 
@@ -402,6 +467,7 @@ with tab_results:
             st.write("Columns:", list(df.columns)[:60])
         else:
             duty_col = infer_duty_column(df.copy())
+            duty_boundary_col = infer_duty_day_boundary_column(df.copy())
             rest_col = infer_rest_column_ftl(df.copy())
 
             if not duty_col and not rest_col:
@@ -416,6 +482,7 @@ with tab_results:
                         duty_col,
                         min_hours=12.0,
                         begin_cols=begin_cols,
+                        end_marker_col=duty_boundary_col,
                     )
                     seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
                     seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
