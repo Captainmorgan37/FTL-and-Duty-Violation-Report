@@ -11,7 +11,7 @@ st.title("FTL Audit: Duty, Rest & 7d/30d Policy")
 st.markdown(
     "Upload the relevant CSV exports and the app will run three checks:"
     "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
-    "\n2) **Short Rest**: ≥2 consecutive days with **rest < 11 hours** _(FTL CSV)_"
+    "\n2) **Short Rest**: Rest Before & Rest After FDP (act) both < 11 hours _(Duty Violation CSV)_"
     "\n3) **7d/30d Policy + Detailed Duty Violations** _(Duty Violation CSV)_"
 )
 
@@ -468,12 +468,10 @@ with tab_results:
         else:
             duty_col = infer_duty_column(df.copy())
             duty_boundary_col = infer_duty_day_boundary_column(df.copy())
-            rest_col = infer_rest_column_ftl(df.copy())
-
-            if not duty_col and not rest_col:
-                st.error("Could not identify Duty or Rest columns in the FTL CSV.")
+            if not duty_col:
+                st.error("Could not identify Duty columns in the FTL CSV.")
             else:
-                duty_work = None; rest_work = None
+                duty_work = None
                 if duty_col:
                     duty_work = build_duty_table(
                         df.copy(),
@@ -486,10 +484,6 @@ with tab_results:
                     )
                     seq2_duty = streaks(duty_work, "LongDuty", min_consecutive=2)
                     seq3_duty = streaks(duty_work, "LongDuty", min_consecutive=3)
-                if rest_col:
-                    rest_work = build_rest_table(df.copy(), pilot_col, date_col, rest_col, short_thresh=11.0)
-                    seq2_rest = streaks(rest_work, "ShortRest", min_consecutive=2)
-
                 st.subheader("Duty Streaks (12+ hr days)")
                 if duty_work is not None and not seq3_duty.empty:
                     pilots = sorted(seq3_duty["Pilot"].unique().tolist())
@@ -506,19 +500,6 @@ with tab_results:
                 st.dataframe(seq2_duty if duty_work is not None else pd.DataFrame(), use_container_width=True)
                 if duty_work is not None:
                     to_csv_download(seq2_duty, "FTL_2x12hr_Consecutive_Duty_Summary.csv", key="dl_duty2")
-
-                st.markdown("---")
-                st.subheader("Short Rest (< 11 hr)")
-                if rest_work is not None and not seq2_rest.empty:
-                    pilots_r = sorted(seq2_rest["Pilot"].unique().tolist())
-                    st.error(f"⚠️ Short Rest TRIGGERED: {len(pilots_r)} pilot(s) with ≥2 consecutive days of rest < 11 hr: {', '.join(pilots_r)}")
-                else:
-                    st.success("✅ No pilots with ≥2 consecutive days of rest < 11 hr detected.")
-
-                st.markdown("**≥ 2 consecutive days with rest < 11 hr**")
-                st.dataframe(seq2_rest if rest_work is not None else pd.DataFrame(), use_container_width=True)
-                if rest_work is not None:
-                    to_csv_download(seq2_rest, "FTL_Consecutive_Short_Rest_Summary.csv", key="dl_rest2")
 
 with tab_policy:
     if dv_file is None:
@@ -576,6 +557,19 @@ with tab_policy:
                 work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
 
             work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestAfter_act"])
+
+            # Preserve row-level view for consecutive rest pairing before we aggregate
+            short_rest_rows = None
+            if "RestBefore_act" in work.columns:
+                short_rest_rows = work.dropna(subset=["RestBefore_act", "RestAfter_act"]).copy()
+                if "Date" in short_rest_rows.columns:
+                    # Present a date-only column for readability while keeping the original timestamp
+                    try:
+                        short_rest_rows["DutyDate"] = pd.to_datetime(short_rest_rows["Date"], errors="coerce", dayfirst=True).dt.date
+                    except Exception:
+                        short_rest_rows["DutyDate"] = pd.NaT
+            else:
+                short_rest_rows = None
 
             # Aggregate conservative per date (min rest) and max rolling totals
             group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
@@ -665,6 +659,46 @@ with tab_policy:
                 to_csv_download(v_fdp, "Violation_FDP_act_gt_max.csv", key="dl_fdp")
             else:
                 st.info("FDP (act/max) columns not found; skipping that check.")
+
+            # Consecutive short rest (Rest Before & Rest After both < 11h)
+            if "RestBefore_act" in work.columns and short_rest_rows is not None:
+                short_both = short_rest_rows[
+                    (short_rest_rows["RestAfter_act"] < 11.0) & (short_rest_rows["RestBefore_act"] < 11.0)
+                ].copy()
+
+                if "DutyDate" in short_both.columns:
+                    display_cols = ["Pilot", "DutyDate"]
+                elif "Date" in short_both.columns:
+                    display_cols = ["Pilot", "Date"]
+                else:
+                    display_cols = ["Pilot"]
+
+                for extra_col in [
+                    "RestBefore_act",
+                    "RestAfter_act",
+                    "RestBefore_min",
+                    "RestAfter_min",
+                    "Hours7d",
+                    "Hours30d",
+                    "FDP_act",
+                    "FDP_max",
+                ]:
+                    if extra_col in short_both.columns:
+                        display_cols.append(extra_col)
+
+                short_both_display = short_both[display_cols].sort_values(display_cols[:2]) if len(display_cols) >= 2 else short_both[display_cols]
+
+                if not short_both_display.empty:
+                    st.error(
+                        f"⚠️ Consecutive short rest: {len(short_both_display)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
+                    )
+                else:
+                    st.success("✅ No consecutive short rest (Rest Before & Rest After FDP act < 11 h) found.")
+                st.markdown("**Rest Before & Rest After FDP (act) both < 11 h**")
+                st.dataframe(short_both_display, use_container_width=True)
+                to_csv_download(short_both_display, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
+            else:
+                st.info("Rest Before FDP (act) column not found; skipping consecutive short rest check.")
 
             # Full export
             to_csv_download(work, "DutyViolation_with_Rest_and_DetailedChecks.csv", key="dl_all")
