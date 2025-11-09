@@ -328,6 +328,11 @@ def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_co
 
     begin_cols = begin_cols or []
     date_series = _coalesce_datetime_columns(df, date_col, begin_cols)
+    begin_series = None
+    if begin_cols:
+        primary_begin = begin_cols[0]
+        fallback_begin = begin_cols[1:]
+        begin_series = _coalesce_datetime_columns(df, primary_begin, fallback_begin)
 
     work = pd.DataFrame({
         "Pilot": df[pilot_col],
@@ -338,6 +343,13 @@ def build_duty_table(df, pilot_col, date_col, duty_col, min_hours=12.0, begin_co
     work["DutyHours"] = work["DutyRaw"].map(parse_duration_to_hours)
     work = work.dropna(subset=["Pilot", "Date", "DutyHours"])
     work["Date"] = _normalize_dates(work["Date"])
+    if begin_series is not None:
+        begin_series = _normalize_dates(begin_series)
+        # Prefer the duty start/report date when available so that duties that
+        # cross midnight remain associated with the calendar day on which they
+        # began instead of appearing as duplicate long-duty days on the
+        # following date.
+        work["Date"] = begin_series.combine_first(work["Date"])
     work = work.sort_values(["Pilot", "Date"]).groupby(["Pilot", "Date"], as_index=False)["DutyHours"].max()
     work["LongDuty"] = work["DutyHours"] >= float(min_hours)
     return work
