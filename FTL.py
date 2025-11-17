@@ -5,8 +5,8 @@ import numpy as np
 import re
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
-st.title("FTL Audit: Duty, Rest & 7d/30d Policy")
+st.set_page_config(page_title="FTL Audit: Duty & Rest", layout="wide")
+st.title("FTL Audit: Duty & Rest")
 
 REST_AFTER_ACT_PATTERNS = [
     r"\bRest\s*After\s*(FDP|Duty)\b.*\(act\)",
@@ -43,10 +43,9 @@ REST_BEFORE_MIN_PATTERNS = [
 
 
 st.markdown(
-    "Upload the relevant CSV exports and the app will run three checks:"
-    "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
-    "\n2) **Short Rest**: Rest Before & Rest After FDP (act) both < 11 hours _(Duty Violation CSV)_"
-    "\n3) **7d/30d Policy + Detailed Duty Violations** _(Duty Violation CSV)_"
+    "Upload the FTL CSV export and the app will run two checks:"
+    "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days"
+    "\n2) **Short Rest**: Rest Before & Rest After FDP (act) both < 11 hours"
 )
 
 # -----------------------------
@@ -205,64 +204,6 @@ def infer_duty_day_boundary_column(df):
     boundary_candidates.sort(key=lambda x: (-x[1], cols.index(x[0])))
     return boundary_candidates[0][0]
 
-
-# ---------- Column inference (Duty Violation CSV) with robust Before/After ----------
-def infer_policy_columns(dv_df):
-    cols = [c.strip() for c in dv_df.columns]
-    dv_df.columns = cols
-    # Pilot
-    pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
-    pilot_col = pilot_candidates[0] if pilot_candidates else None
-    # 7d/30d
-    c7_candidates = [c for c in cols if re.search(r"\b7\s*d(ay|ays)?\b|\b7d\b|past\s*7", c, re.I)]
-    c30_candidates = [c for c in cols if re.search(r"\b30\s*d(ay|ays)?\b|\b30d\b|past\s*30", c, re.I)]
-    if not c7_candidates:
-        c7_candidates = [c for c in cols if re.search(r"(7d|past.?7).*(flight|block|time)", c, re.I)]
-    if not c30_candidates:
-        c30_candidates = [c for c in cols if re.search(r"(30d|past.?30).*(flight|block|time)", c, re.I)]
-    c7 = c7_candidates[0] if c7_candidates else None
-    c30 = c30_candidates[0] if c30_candidates else None
-
-    def find_col(patterns, exclude=None):
-        for pat in patterns:
-            for c in cols:
-                if exclude and c == exclude:
-                    continue
-                if re.search(pat, c, re.I):
-                    return c
-        return None
-
-    rest_after_act = find_col(REST_AFTER_ACT_PATTERNS)
-    rest_after_min = find_col(REST_AFTER_MIN_PATTERNS)
-    rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
-    rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
-
-    # Guard: ensure distinct matches
-    if rest_before_act == rest_after_act:
-        rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
-    if rest_before_min == rest_after_min:
-        rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
-
-    # FDP act/max
-    fdp_act = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(act\)|\bFDP\b.*\(act\)", c, re.I)), None)
-    fdp_max = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(max\)|\bFDP\b.*\(max\)", c, re.I)), None)
-
-    # Date (optional)
-    date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
-    date_col = None
-    for c in date_candidates:
-        parsed = pd.to_datetime(dv_df[c], errors="coerce", dayfirst=True)
-        if parsed.notna().mean() > 0.5:
-            date_col = c
-            break
-
-    return {
-        "pilot_col": pilot_col, "c7": c7, "c30": c30,
-        "rest_after_act": rest_after_act, "rest_after_min": rest_after_min,
-        "rest_before_act": rest_before_act, "rest_before_min": rest_before_min,
-        "fdp_act": fdp_act, "fdp_max": fdp_max, "date_col": date_col,
-        "all_cols": cols,
-    }
 
 # ---------- Generic utils ----------
 def to_csv_download(df, filename, key=None):
@@ -473,28 +414,16 @@ def build_consecutive_short_rest_rows(df, pilot_col, date_col, rest_before_col, 
             flagged[col] = flagged[col].round(2)
     return flagged.sort_values(["Pilot"] + (["DutyDate"] if "DutyDate" in flagged.columns else []))
 
-def coverage_table(df, flag_col_name):
-    cov = df.groupby("Pilot").agg(
-        FirstDate=("Date", "min"),
-        LastDate=("Date", "max"),
-        DaysCount=("Date", "nunique"),
-        FlaggedDays=(flag_col_name, "sum")
-    ).reset_index().sort_values("Pilot")
-    cov["FirstDate"] = cov["FirstDate"].dt.date
-    cov["LastDate"] = cov["LastDate"].dt.date
-    return cov
-
 # -----------------------------
 # Uploaders
 # -----------------------------
 st.sidebar.header("Uploads")
 ftl_file = st.sidebar.file_uploader("FTL CSV (for Duty & Short Rest checks)", type=["csv"], key="ftl_csv")
-dv_file = st.sidebar.file_uploader("Duty Violation CSV (for 7d/30d Policy + detailed checks)", type=["csv"], key="dv_csv")
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_results, tab_policy, tab_debug = st.tabs(["Results (FTL)", "7d/30d Policy (Duty Violation)", "Debug"])
+tab_results, tab_debug = st.tabs(["Results (FTL)", "Debug"])
 
 with tab_results:
     if ftl_file is None:
@@ -570,208 +499,6 @@ with tab_results:
                     st.error(f"⚠️ Consecutive minimum rest triggered for {len(pilots)} pilot(s): {', '.join(pilots)}")
                     st.dataframe(rest_pairs, use_container_width=True)
                     to_csv_download(rest_pairs, "FTL_consecutive_min_rest_summary.csv", key="dl_rest_consecutive")
-
-with tab_policy:
-    if dv_file is None:
-        st.info("Upload the **Duty Violation CSV** in the sidebar to run the 7d/30d policy screen and detailed checks.")
-    else:
-        dv = try_read_csv(dv_file)
-        meta = infer_policy_columns(dv.copy())
-
-        # Column mapping expander — hide Rest Before columns
-        with st.expander("Column mapping (detected from CSV headers)"):
-            mapping_view = {k: v for k, v in meta.items() 
-                            if k not in ("all_cols", "rest_before_act", "rest_before_min")}
-            st.write(mapping_view)
-
-        pilot_col = meta["pilot_col"]; c7 = meta["c7"]; c30 = meta["c30"]
-        rest_after_act = meta["rest_after_act"]; rest_after_min = meta["rest_after_min"]
-        # Detected but hidden from mapping view:
-        rest_before_act = meta["rest_before_act"]; rest_before_min = meta["rest_before_min"]
-        fdp_act = meta["fdp_act"]; fdp_max = meta["fdp_max"]; date_col = meta["date_col"]
-
-        if not (pilot_col and c7 and c30 and rest_after_act):
-            st.error("Required columns missing in Duty Violation CSV (need: Pilot, 7d, 30d, Rest After FDP (act) at minimum).")
-            st.write("Columns:", list(dv.columns)[:80])
-        else:
-            dv[pilot_col] = dv[pilot_col].ffill()
-            cols = [pilot_col, c7, c30, rest_after_act] + \
-                   ([rest_after_min] if rest_after_min else []) + \
-                   ([rest_before_act] if rest_before_act else []) + \
-                   ([rest_before_min] if rest_before_min else []) + \
-                   ([fdp_act] if fdp_act else []) + \
-                   ([fdp_max] if fdp_max else []) + \
-                   ([date_col] if date_col else [])
-            work = dv[cols].copy()
-
-            new_cols = ["Pilot", "Hours7dRaw", "Hours30dRaw", "RestAfter_actRaw"]
-            if rest_after_min: new_cols.append("RestAfter_minRaw")
-            if rest_before_act: new_cols.append("RestBefore_actRaw")
-            if rest_before_min: new_cols.append("RestBefore_minRaw")
-            if fdp_act: new_cols.append("FDP_actRaw")
-            if fdp_max: new_cols.append("FDP_maxRaw")
-            if date_col: new_cols.append("Date")
-            work.columns = new_cols
-
-            # Parse
-            p = parse_duration_to_hours
-            work["Hours7d"] = work["Hours7dRaw"].map(p)
-            work["Hours30d"] = work["Hours30dRaw"].map(p)
-            work["RestAfter_act"] = work["RestAfter_actRaw"].map(p)
-            if "RestAfter_minRaw" in work.columns: work["RestAfter_min"] = work["RestAfter_minRaw"].map(p)
-            if "RestBefore_actRaw" in work.columns: work["RestBefore_act"] = work["RestBefore_actRaw"].map(p)
-            if "RestBefore_minRaw" in work.columns: work["RestBefore_min"] = work["RestBefore_minRaw"].map(p)
-            if "FDP_actRaw" in work.columns: work["FDP_act"] = work["FDP_actRaw"].map(p)
-            if "FDP_maxRaw" in work.columns: work["FDP_max"] = work["FDP_maxRaw"].map(p)
-            if "Date" in work.columns:
-                work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
-
-            work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestAfter_act"])
-
-            # Preserve row-level view for consecutive rest pairing before we aggregate
-            short_rest_rows = None
-            if "RestBefore_act" in work.columns:
-                short_rest_rows = work.dropna(subset=["RestBefore_act", "RestAfter_act"]).copy()
-                if "Date" in short_rest_rows.columns:
-                    # Present a date-only column for readability while keeping the original timestamp
-                    try:
-                        short_rest_rows["DutyDate"] = pd.to_datetime(short_rest_rows["Date"], errors="coerce", dayfirst=True).dt.date
-                    except Exception:
-                        short_rest_rows["DutyDate"] = pd.NaT
-            else:
-                short_rest_rows = None
-
-            # Aggregate conservative per date (min rest) and max rolling totals
-            group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
-            # For rest-after values we want the overnight rest that follows the entire duty, not
-            # the shortest turn time that might appear on intermediate legs.  The last leg of a
-            # duty period carries the longest "Rest After" value, so we aggregate using "max"
-            # instead of "min" (which previously caused false short-rest violations when
-            # mid-duty turns were present in the source rows).
-            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestAfter_act": "max"}
-            if "RestAfter_min" in work.columns: aggdict["RestAfter_min"] = "max"
-            if "RestBefore_act" in work.columns: aggdict["RestBefore_act"] = "min"
-            if "RestBefore_min" in work.columns: aggdict["RestBefore_min"] = "min"
-            if "FDP_act" in work.columns: aggdict["FDP_act"] = "max"
-            if "FDP_max" in work.columns: aggdict["FDP_max"] = "max"
-
-            work = work.sort_values(group_keys).groupby(group_keys, as_index=False).agg(aggdict)
-
-            # 7d/30d policy with turn-time
-            work["Over40in7d"] = work["Hours7d"] > 40.0
-            work["Under48_7d"] = work["Hours7d"] < 48.0
-            work["Under70_30d"] = work["Hours30d"] < 70.0
-            work["ShortTurn"] = work["RestAfter_act"] < 11.0
-
-            def classify(row):
-                if not row["Over40in7d"]:
-                    return "OK (≤40 in 7d)"
-                if row["Under48_7d"] and row["Under70_30d"]:
-                    return "Allowed with 11h turn (PASS)" if not row["ShortTurn"] else "Allowed with 11h turn (FAIL — rest < 11h)"
-                if row["Hours7d"] >= 48.0 or row["Hours30d"] >= 70.0:
-                    return "Not Allowed (≥48 in 7d or ≥70 in 30d)"
-                return "Review"
-
-            work["PolicyStatus"] = work.apply(classify, axis=1)
-
-            # Banners
-            not_allowed = work[work["PolicyStatus"].str.contains("Not Allowed", na=False)]
-            exception_fail = work[work["PolicyStatus"].str.contains("FAIL", na=False)]
-            exception_pass = work[work["PolicyStatus"].str.contains("PASS", na=False)]
-
-            if not not_allowed.empty or not exception_fail.empty:
-                bad_pilots = sorted(set(not_allowed["Pilot"].tolist() + exception_fail["Pilot"].tolist()))
-                st.error(f"⚠️ 7d/30d Policy VIOLATIONS: {len(bad_pilots)} pilot(s): {', '.join(bad_pilots)}")
-            else:
-                st.success("✅ 7d/30d policy clean (no 'Not Allowed' or 'Exception FAIL').")
-
-            # Tables
-            st.markdown("**Not Allowed (≥48 in 7d or ≥70 in 30d)**")
-            st.dataframe(not_allowed, use_container_width=True)
-            to_csv_download(not_allowed, "DutyViolation_not_allowed_ge48_7d_or_ge70_30d.csv", key="dl_na")
-
-            st.markdown("**Over 40 in 7d — EXCEPTION FAIL (Rest < 11 h)**")
-            st.dataframe(exception_fail, use_container_width=True)
-            to_csv_download(exception_fail, "DutyViolation_over40_exception_FAIL_restlt11.csv", key="dl_fail")
-
-            st.markdown("**Over 40 in 7d — EXCEPTION PASS (Rest ≥ 11 h)**")
-            st.dataframe(exception_pass, use_container_width=True)
-            to_csv_download(exception_pass, "DutyViolation_over40_exception_PASS_rest_ge11.csv", key="dl_pass")
-
-            # ---- Additional detailed duty violations ----
-            st.markdown("---")
-            st.subheader("Additional Duty Violations")
-
-            # Rest After vs Min (KEEP)
-            if "RestAfter_min" in work.columns:
-                v_after = work.dropna(subset=["RestAfter_act", "RestAfter_min"]).copy()
-                v_after = v_after[v_after["RestAfter_act"] < v_after["RestAfter_min"]]
-                if not v_after.empty:
-                    st.error(f"⚠️ Rest After FDP violations: {len(v_after)} row(s) (act < min)")
-                else:
-                    st.success("✅ No Rest After FDP (act < min) violations found.")
-                st.markdown("**Rest After FDP (act) < Rest After FDP (min)**")
-                st.dataframe(v_after, use_container_width=True)
-                to_csv_download(v_after, "Violation_RestAfter_act_lt_min.csv", key="dl_rest_after")
-            else:
-                st.info("Rest After FDP (min) column not found; skipping that check.")
-
-            # FDP act vs max (KEEP)
-            if "FDP_act" in work.columns and "FDP_max" in work.columns:
-                v_fdp = work.dropna(subset=["FDP_act", "FDP_max"]).copy()
-                v_fdp = v_fdp[v_fdp["FDP_act"] > v_fdp["FDP_max"]]
-                if not v_fdp.empty:
-                    st.error(f"⚠️ FDP Max violations: {len(v_fdp)} row(s) (act > max)")
-                else:
-                    st.success("✅ No FDP act > max violations found.")
-                st.markdown("**Flight Duty Period (act) > Flight Duty Period (max)**")
-                st.dataframe(v_fdp, use_container_width=True)
-                to_csv_download(v_fdp, "Violation_FDP_act_gt_max.csv", key="dl_fdp")
-            else:
-                st.info("FDP (act/max) columns not found; skipping that check.")
-
-            # Consecutive short rest (Rest Before & Rest After both < 11h)
-            if "RestBefore_act" in work.columns and short_rest_rows is not None:
-                short_both = short_rest_rows[
-                    (short_rest_rows["RestAfter_act"] < 11.0) & (short_rest_rows["RestBefore_act"] < 11.0)
-                ].copy()
-
-                if "DutyDate" in short_both.columns:
-                    display_cols = ["Pilot", "DutyDate"]
-                elif "Date" in short_both.columns:
-                    display_cols = ["Pilot", "Date"]
-                else:
-                    display_cols = ["Pilot"]
-
-                for extra_col in [
-                    "RestBefore_act",
-                    "RestAfter_act",
-                    "RestBefore_min",
-                    "RestAfter_min",
-                    "Hours7d",
-                    "Hours30d",
-                    "FDP_act",
-                    "FDP_max",
-                ]:
-                    if extra_col in short_both.columns:
-                        display_cols.append(extra_col)
-
-                short_both_display = short_both[display_cols].sort_values(display_cols[:2]) if len(display_cols) >= 2 else short_both[display_cols]
-
-                if not short_both_display.empty:
-                    st.error(
-                        f"⚠️ Consecutive short rest: {len(short_both_display)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
-                    )
-                else:
-                    st.success("✅ No consecutive short rest (Rest Before & Rest After FDP act < 11 h) found.")
-                st.markdown("**Rest Before & Rest After FDP (act) both < 11 h**")
-                st.dataframe(short_both_display, use_container_width=True)
-                to_csv_download(short_both_display, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
-            else:
-                st.info("Rest Before FDP (act) column not found; skipping consecutive short rest check.")
-
-            # Full export
-            to_csv_download(work, "DutyViolation_with_Rest_and_DetailedChecks.csv", key="dl_all")
 
 with tab_debug:
     st.caption("If you want coverage/normalized tables in this version's Debug tab, I can add them.")
