@@ -5,8 +5,8 @@ import numpy as np
 import re
 from datetime import timedelta
 
-st.set_page_config(page_title="FTL Audit: Duty & Rest", layout="wide")
-st.title("FTL Audit: Duty & Rest")
+st.set_page_config(page_title="FTL Audit: Duty, Rest & 7d/30d Policy", layout="wide")
+st.title("FTL Audit: Duty, Rest & 7d/30d Policy")
 
 REST_AFTER_ACT_PATTERNS = [
     r"\bRest\s*After\s*(FDP|Duty)\b.*\(act\)",
@@ -43,41 +43,89 @@ REST_BEFORE_MIN_PATTERNS = [
 
 
 st.markdown(
-    "Upload the FTL CSV export and the app will run two checks:"
-    "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days"
-    "\n2) **Short Rest**: Rest Before & Rest After FDP (act) both < 11 hours"
+    "Upload the relevant CSV exports and the app will run three checks:"
+    "\n\n1) **Duty Streaks**: ≥2 and ≥3 consecutive **12+ hr duty** days _(FTL CSV)_"
+    "\n2) **Short Rest**: Rest Before & Rest After FDP (act) both < 11 hours _(Duty Violation CSV)_"
+    "\n3) **7d/30d Policy + Detailed Duty Violations** _(Duty Violation CSV)_"
 )
 
 # -----------------------------
 # Helpers
 # -----------------------------
 def parse_duration_to_hours(val):
-    if pd.isna(val): return np.nan
+    if pd.isna(val):
+        return np.nan
+
+    # ---------------------------------------------------------
+    # Excel datetime duration fix
+    # FL3XX sometimes encodes durations (e.g. "30:02") as a
+    # timestamp (e.g. 1900-01-02 06:02:00).
+    # This block extracts the *duration* from that timestamp.
+    # ---------------------------------------------------------
+    try:
+        # Detect raw datetime-like objects (numpy, pandas, python)
+        if isinstance(val, (pd.Timestamp, datetime)) or \
+           ("datetime" in str(type(val)).lower()):
+            dt = pd.to_datetime(val, errors="coerce")
+            if pd.notna(dt):
+                # Excel stores durations as "time of day" plus day rollover
+                hours = dt.hour + dt.minute / 60 + dt.second / 3600
+
+                # If day > 1, Excel has rolled over past midnight
+                # so each additional day = +24 hours
+                if dt.day > 1:
+                    hours += (dt.day - 1) * 24
+
+                return hours
+    except Exception:
+        pass
+
+    # ---------------------------------------------------------
+    # Normal string-based duration parsing
+    # ---------------------------------------------------------
     s = str(val).strip()
-    if s == "": return np.nan
-    # Remove parenthetical annotations such as "(split duty)" that can appear
-    # alongside the duration values so they don't interfere with parsing.
+    if s == "":
+        return np.nan
+
+    # Remove annotations like "(split duty)"
     s = re.sub(r"\([^)]*\)", "", s)
+
+    # Normalize common formats
     s = s.replace("hours", ":").replace("hour", ":").replace("H", ":").replace("h", ":")
     s = s.replace(" ", "").replace("::", ":").replace(".", ":")
+
+    # Match HH:MM or HHH:MM:SS
     m = re.match(r"^(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?$", s)
     if m:
-        h=int(m.group(1)); mi=int(m.group(2)); se=int(m.group(3)) if m.group(3) else 0
+        h = int(m.group(1))
+        mi = int(m.group(2))
+        se = int(m.group(3)) if m.group(3) else 0
         return h + mi/60 + se/3600
+
+    # Match "45m" or "45 min"
     m2 = re.match(r"^(\d+)\s*(m|min)$", s, flags=re.I)
-    if m2: return int(m2.group(1))/60.0
-    if re.match(r"^\d+(\.\d+)?$", s): return float(s)
+    if m2:
+        return int(m2.group(1)) / 60.0
+
+    # Pure number like "12.5"
+    if re.match(r"^\d+(\.\d+)?$", s):
+        return float(s)
+
+    # Match formats like "12h 30m"
     h = re.search(r"(\d+)\s*h", s, flags=re.I)
     mi = re.search(r"(\d+)\s*m", s, flags=re.I)
     if h or mi:
-        hours=int(h.group(1)) if h else 0
-        minutes=int(mi.group(1)) if mi else 0
-        return hours + minutes/60
+        hours = int(h.group(1)) if h else 0
+        minutes = int(mi.group(1)) if mi else 0
+        return hours + minutes / 60
+
+    # Last-resort timedelta parser
     try:
         td = pd.to_timedelta(s)
-        return td.total_seconds()/3600.0
+        return td.total_seconds() / 3600.0
     except Exception:
         return np.nan
+
 
 def try_read_csv(uploaded_file):
     try:
@@ -85,6 +133,21 @@ def try_read_csv(uploaded_file):
     except Exception:
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, sep=";", engine="python", encoding="utf-8", on_bad_lines="skip")
+
+
+def pick_column(columns, keywords=None, letter_fallback=None):
+    keywords = keywords or []
+    for col in columns:
+        lower = col.lower()
+        if any(key in lower for key in keywords):
+            return col
+
+    if letter_fallback:
+        idx = ord(letter_fallback.upper()) - ord("A")
+        if 0 <= idx < len(columns):
+            return columns[idx]
+
+    return None
 
 # ---------- Column inference (FTL CSV) ----------
 def infer_common_columns(df):
@@ -204,6 +267,64 @@ def infer_duty_day_boundary_column(df):
     boundary_candidates.sort(key=lambda x: (-x[1], cols.index(x[0])))
     return boundary_candidates[0][0]
 
+
+# ---------- Column inference (Duty Violation CSV) with robust Before/After ----------
+def infer_policy_columns(dv_df):
+    cols = [c.strip() for c in dv_df.columns]
+    dv_df.columns = cols
+    # Pilot
+    pilot_candidates = [c for c in cols if re.search(r"(pilot|crew|user|employee|person|name)", c, re.I)]
+    pilot_col = pilot_candidates[0] if pilot_candidates else None
+    # 7d/30d
+    c7_candidates = [c for c in cols if re.search(r"\b7\s*d(ay|ays)?\b|\b7d\b|past\s*7", c, re.I)]
+    c30_candidates = [c for c in cols if re.search(r"\b30\s*d(ay|ays)?\b|\b30d\b|past\s*30", c, re.I)]
+    if not c7_candidates:
+        c7_candidates = [c for c in cols if re.search(r"(7d|past.?7).*(flight|block|time)", c, re.I)]
+    if not c30_candidates:
+        c30_candidates = [c for c in cols if re.search(r"(30d|past.?30).*(flight|block|time)", c, re.I)]
+    c7 = c7_candidates[0] if c7_candidates else None
+    c30 = c30_candidates[0] if c30_candidates else None
+
+    def find_col(patterns, exclude=None):
+        for pat in patterns:
+            for c in cols:
+                if exclude and c == exclude:
+                    continue
+                if re.search(pat, c, re.I):
+                    return c
+        return None
+
+    rest_after_act = find_col(REST_AFTER_ACT_PATTERNS)
+    rest_after_min = find_col(REST_AFTER_MIN_PATTERNS)
+    rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
+    rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
+
+    # Guard: ensure distinct matches
+    if rest_before_act == rest_after_act:
+        rest_before_act = find_col(REST_BEFORE_ACT_PATTERNS, exclude=rest_after_act)
+    if rest_before_min == rest_after_min:
+        rest_before_min = find_col(REST_BEFORE_MIN_PATTERNS, exclude=rest_after_min)
+
+    # FDP act/max
+    fdp_act = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(act\)|\bFDP\b.*\(act\)", c, re.I)), None)
+    fdp_max = next((c for c in cols if re.search(r"(Flight\s*)?Duty\s*Period.*\(max\)|\bFDP\b.*\(max\)", c, re.I)), None)
+
+    # Date (optional)
+    date_candidates = [c for c in cols if re.search(r"(date|day)", c, re.I)]
+    date_col = None
+    for c in date_candidates:
+        parsed = pd.to_datetime(dv_df[c], errors="coerce", dayfirst=True)
+        if parsed.notna().mean() > 0.5:
+            date_col = c
+            break
+
+    return {
+        "pilot_col": pilot_col, "c7": c7, "c30": c30,
+        "rest_after_act": rest_after_act, "rest_after_min": rest_after_min,
+        "rest_before_act": rest_before_act, "rest_before_min": rest_before_min,
+        "fdp_act": fdp_act, "fdp_max": fdp_max, "date_col": date_col,
+        "all_cols": cols,
+    }
 
 # ---------- Generic utils ----------
 def to_csv_download(df, filename, key=None):
@@ -414,22 +535,95 @@ def build_consecutive_short_rest_rows(df, pilot_col, date_col, rest_before_col, 
             flagged[col] = flagged[col].round(2)
     return flagged.sort_values(["Pilot"] + (["DutyDate"] if "DutyDate" in flagged.columns else []))
 
+
+def summarize_min_rest_days(df, pilot_col, date_col, rest_prior_col, short_thresh=11.0, lower_bound=10.0):
+    work = df[[pilot_col, rest_prior_col]].copy()
+    work.columns = ["Pilot", "RestPriorRaw"]
+    work["Pilot"] = work["Pilot"].ffill()
+
+    work["RestPriorHours"] = work["RestPriorRaw"].map(parse_duration_to_hours)
+
+    if date_col:
+        work["DutyDate"] = _normalize_dates(pd.to_datetime(df[date_col], errors="coerce", dayfirst=True))
+    else:
+        work["DutyDate"] = pd.NaT
+
+    min_rest_lower = float(lower_bound)
+    min_rest_upper = float(short_thresh)
+
+    flagged = work[
+        work["RestPriorHours"].between(min_rest_lower, min_rest_upper, inclusive="left")
+    ].dropna(subset=["Pilot", "RestPriorHours"])
+
+    summary = pd.DataFrame(columns=["Pilot", "DaysWithMinRest"])
+    detail = pd.DataFrame(columns=["Pilot", "DutyDate", "RestPriorHours"])
+
+    if flagged.empty:
+        return summary, detail
+
+    if date_col:
+        flagged = flagged.dropna(subset=["DutyDate"])
+        if flagged.empty:
+            return summary, detail
+
+        detail = flagged.groupby(["Pilot", "DutyDate"], as_index=False)["RestPriorHours"].min()
+        summary = detail.groupby("Pilot", as_index=False).agg(DaysWithMinRest=("DutyDate", "nunique"))
+    else:
+        summary = flagged.groupby("Pilot", as_index=False).agg(DaysWithMinRest=("RestPriorHours", "count"))
+        detail = flagged.groupby("Pilot", as_index=False).agg(RestPriorHours=("RestPriorHours", "min"))
+
+    if "RestPriorHours" in detail.columns:
+        detail["RestPriorHours"] = detail["RestPriorHours"].round(2)
+
+    return summary, detail
+
+def coverage_table(df, flag_col_name):
+    cov = df.groupby("Pilot").agg(
+        FirstDate=("Date", "min"),
+        LastDate=("Date", "max"),
+        DaysCount=("Date", "nunique"),
+        FlaggedDays=(flag_col_name, "sum")
+    ).reset_index().sort_values("Pilot")
+    cov["FirstDate"] = cov["FirstDate"].dt.date
+    cov["LastDate"] = cov["LastDate"].dt.date
+    return cov
+
 # -----------------------------
 # Uploaders
 # -----------------------------
 st.sidebar.header("Uploads")
 ftl_file = st.sidebar.file_uploader("FTL CSV (for Duty & Short Rest checks)", type=["csv"], key="ftl_csv")
+dv_file = st.sidebar.file_uploader("Duty Violation CSV (for 7d/30d Policy + detailed checks)", type=["csv"], key="dv_csv")
+
+ftl_df = try_read_csv(ftl_file) if ftl_file else None
+dv_df = try_read_csv(dv_file) if dv_file else None
+
+# Store uploaded dataframes so all tabs (including Debug) can access them
+if ftl_df is not None:
+    st.session_state["ftl_df"] = ftl_df
+
+if dv_df is not None:
+    st.session_state["dv_df"] = dv_df
+
+
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_results, tab_debug = st.tabs(["Results (FTL)", "Debug"])
+tab_results, tab_rest_duty, tab_policy, tab_min_rest, tab_ft_exceed, tab_debug = st.tabs([
+    "Results (FTL)",
+    "Rest Periods Under 11 Hours (FTL)",
+    "7d/30d Policy (Duty Violation)",
+    "Total 12+ Hour Duty Days (FTL)",
+    "Flight Time Threshold Checker",
+    "Debug"
+])
 
 with tab_results:
-    if ftl_file is None:
+    if ftl_df is None:
         st.info("Upload the **FTL CSV** in the sidebar to run Duty Streaks and Short Rest checks.")
     else:
-        df = try_read_csv(ftl_file)
+        df = ftl_df
         pilot_col, date_col = infer_common_columns(df.copy())
         begin_cols, _ = infer_begin_end_columns(df.copy(), date_col=date_col)
 
@@ -500,5 +694,569 @@ with tab_results:
                     st.dataframe(rest_pairs, use_container_width=True)
                     to_csv_download(rest_pairs, "FTL_consecutive_min_rest_summary.csv", key="dl_rest_consecutive")
 
+with tab_rest_duty:
+    st.caption("Upload an FTL CSV with a rest prior column to count minimum rest days (10.0–10.99 h).")
+
+    if ftl_df is None:
+        st.info("Upload the **FTL CSV** in the sidebar to calculate minimum rest days.")
+    else:
+        df = ftl_df
+        pilot_col, date_col = infer_common_columns(df.copy())
+        rest_before_col, _ = infer_rest_pair_columns_ftl(df.copy())
+
+        st.markdown("**Rest prior column**")
+        rest_options = list(df.columns)
+        default_index = 0
+        if rest_before_col in rest_options:
+            default_index = rest_options.index(rest_before_col)
+        else:
+            rest_like = [i for i, name in enumerate(rest_options) if re.search(r"rest", str(name), re.I)]
+            if rest_like:
+                default_index = rest_like[0]
+
+        rest_column = st.selectbox(
+            "Select the column that contains rest prior values",
+            options=rest_options,
+            index=default_index if rest_options else None,
+            key="rest_prior_column",
+        ) if rest_options else None
+
+        if not (pilot_col and date_col):
+            st.error("Could not identify the Pilot and Date columns in the FTL CSV.")
+        elif rest_column is None:
+            st.error("No columns available to evaluate rest prior values.")
+        else:
+            summary, detail = summarize_min_rest_days(
+                df.copy(), pilot_col, date_col, rest_column, short_thresh=11.0, lower_bound=10.0
+            )
+
+            st.subheader("Days with minimum rest (10.0–10.99 h) by pilot")
+            if summary.empty:
+                st.success("✅ No minimum rest days detected in the provided period.")
+            else:
+                st.error(
+                    f"⚠️ Minimum rest triggered for {summary['DaysWithMinRest'].sum()} day(s) across {len(summary)} pilot(s)."
+                )
+            st.dataframe(summary, use_container_width=True)
+            to_csv_download(summary, "FTL_min_rest_days_by_pilot.csv", key="dl_min_rest_summary")
+
+            st.markdown("**Detailed minimum rest days (10.0–10.99 h)**")
+            st.dataframe(detail, use_container_width=True)
+            to_csv_download(detail, "FTL_min_rest_day_details.csv", key="dl_min_rest_details")
+
+with tab_policy:
+    if dv_df is None:
+        st.info("Upload the **Duty Violation CSV** in the sidebar to run the 7d/30d policy screen and detailed checks.")
+    else:
+        dv = dv_df
+        meta = infer_policy_columns(dv.copy())
+
+        # Column mapping expander — hide Rest Before columns
+        with st.expander("Column mapping (detected from CSV headers)"):
+            mapping_view = {k: v for k, v in meta.items() 
+                            if k not in ("all_cols", "rest_before_act", "rest_before_min")}
+            st.write(mapping_view)
+
+        pilot_col = meta["pilot_col"]; c7 = meta["c7"]; c30 = meta["c30"]
+        rest_after_act = meta["rest_after_act"]; rest_after_min = meta["rest_after_min"]
+        # Detected but hidden from mapping view:
+        rest_before_act = meta["rest_before_act"]; rest_before_min = meta["rest_before_min"]
+        fdp_act = meta["fdp_act"]; fdp_max = meta["fdp_max"]; date_col = meta["date_col"]
+
+        if not (pilot_col and c7 and c30 and rest_after_act):
+            st.error("Required columns missing in Duty Violation CSV (need: Pilot, 7d, 30d, Rest After FDP (act) at minimum).")
+            st.write("Columns:", list(dv.columns)[:80])
+        else:
+            dv[pilot_col] = dv[pilot_col].ffill()
+            cols = [pilot_col, c7, c30, rest_after_act] + \
+                   ([rest_after_min] if rest_after_min else []) + \
+                   ([rest_before_act] if rest_before_act else []) + \
+                   ([rest_before_min] if rest_before_min else []) + \
+                   ([fdp_act] if fdp_act else []) + \
+                   ([fdp_max] if fdp_max else []) + \
+                   ([date_col] if date_col else [])
+            work = dv[cols].copy()
+
+            new_cols = ["Pilot", "Hours7dRaw", "Hours30dRaw", "RestAfter_actRaw"]
+            if rest_after_min: new_cols.append("RestAfter_minRaw")
+            if rest_before_act: new_cols.append("RestBefore_actRaw")
+            if rest_before_min: new_cols.append("RestBefore_minRaw")
+            if fdp_act: new_cols.append("FDP_actRaw")
+            if fdp_max: new_cols.append("FDP_maxRaw")
+            if date_col: new_cols.append("Date")
+            work.columns = new_cols
+
+            # Parse
+            p = parse_duration_to_hours
+            work["Hours7d"] = work["Hours7dRaw"].map(p)
+            work["Hours30d"] = work["Hours30dRaw"].map(p)
+            work["RestAfter_act"] = work["RestAfter_actRaw"].map(p)
+            if "RestAfter_minRaw" in work.columns: work["RestAfter_min"] = work["RestAfter_minRaw"].map(p)
+            if "RestBefore_actRaw" in work.columns: work["RestBefore_act"] = work["RestBefore_actRaw"].map(p)
+            if "RestBefore_minRaw" in work.columns: work["RestBefore_min"] = work["RestBefore_minRaw"].map(p)
+            if "FDP_actRaw" in work.columns: work["FDP_act"] = work["FDP_actRaw"].map(p)
+            if "FDP_maxRaw" in work.columns: work["FDP_max"] = work["FDP_maxRaw"].map(p)
+            if "Date" in work.columns:
+                work["Date"] = pd.to_datetime(work["Date"], errors="coerce", dayfirst=True)
+
+            work = work.dropna(subset=["Pilot", "Hours7d", "Hours30d", "RestAfter_act"])
+
+            # Preserve row-level view for consecutive rest pairing before we aggregate
+            short_rest_rows = None
+            if "RestBefore_act" in work.columns:
+                short_rest_rows = work.dropna(subset=["RestBefore_act", "RestAfter_act"]).copy()
+                if "Date" in short_rest_rows.columns:
+                    # Present a date-only column for readability while keeping the original timestamp
+                    try:
+                        short_rest_rows["DutyDate"] = pd.to_datetime(short_rest_rows["Date"], errors="coerce", dayfirst=True).dt.date
+                    except Exception:
+                        short_rest_rows["DutyDate"] = pd.NaT
+            else:
+                short_rest_rows = None
+
+            # Aggregate conservative per date (min rest) and max rolling totals
+            group_keys = ["Pilot"] + (["Date"] if "Date" in work.columns else [])
+            # For rest-after values we want the overnight rest that follows the entire duty, not
+            # the shortest turn time that might appear on intermediate legs.  The last leg of a
+            # duty period carries the longest "Rest After" value, so we aggregate using "max"
+            # instead of "min" (which previously caused false short-rest violations when
+            # mid-duty turns were present in the source rows).
+            aggdict = {"Hours7d": "max", "Hours30d": "max", "RestAfter_act": "max"}
+            if "RestAfter_min" in work.columns: aggdict["RestAfter_min"] = "max"
+            if "RestBefore_act" in work.columns: aggdict["RestBefore_act"] = "min"
+            if "RestBefore_min" in work.columns: aggdict["RestBefore_min"] = "min"
+            if "FDP_act" in work.columns: aggdict["FDP_act"] = "max"
+            if "FDP_max" in work.columns: aggdict["FDP_max"] = "max"
+
+            work = work.sort_values(group_keys).groupby(group_keys, as_index=False).agg(aggdict)
+
+            # 7d/30d policy with turn-time
+            work["Over40in7d"] = work["Hours7d"] > 40.0
+            work["Under48_7d"] = work["Hours7d"] < 48.0
+            work["Under70_30d"] = work["Hours30d"] < 70.0
+            work["ShortTurn"] = work["RestAfter_act"] < 11.0
+
+            def classify(row):
+                if not row["Over40in7d"]:
+                    return "OK (≤40 in 7d)"
+                if row["Under48_7d"] and row["Under70_30d"]:
+                    return "Allowed with 11h turn (PASS)" if not row["ShortTurn"] else "Allowed with 11h turn (FAIL — rest < 11h)"
+                if row["Hours7d"] >= 48.0 or row["Hours30d"] >= 70.0:
+                    return "Not Allowed (≥48 in 7d or ≥70 in 30d)"
+                return "Review"
+
+            work["PolicyStatus"] = work.apply(classify, axis=1)
+
+            # Banners
+            not_allowed = work[work["PolicyStatus"].str.contains("Not Allowed", na=False)]
+            exception_fail = work[work["PolicyStatus"].str.contains("FAIL", na=False)]
+            exception_pass = work[work["PolicyStatus"].str.contains("PASS", na=False)]
+
+            if not not_allowed.empty or not exception_fail.empty:
+                bad_pilots = sorted(set(not_allowed["Pilot"].tolist() + exception_fail["Pilot"].tolist()))
+                st.error(f"⚠️ 7d/30d Policy VIOLATIONS: {len(bad_pilots)} pilot(s): {', '.join(bad_pilots)}")
+            else:
+                st.success("✅ 7d/30d policy clean (no 'Not Allowed' or 'Exception FAIL').")
+
+            # Tables
+            st.markdown("**Not Allowed (≥48 in 7d or ≥70 in 30d)**")
+            st.dataframe(not_allowed, use_container_width=True)
+            to_csv_download(not_allowed, "DutyViolation_not_allowed_ge48_7d_or_ge70_30d.csv", key="dl_na")
+
+            st.markdown("**Over 40 in 7d — EXCEPTION FAIL (Rest < 11 h)**")
+            st.dataframe(exception_fail, use_container_width=True)
+            to_csv_download(exception_fail, "DutyViolation_over40_exception_FAIL_restlt11.csv", key="dl_fail")
+
+            st.markdown("**Over 40 in 7d — EXCEPTION PASS (Rest ≥ 11 h)**")
+            st.dataframe(exception_pass, use_container_width=True)
+            to_csv_download(exception_pass, "DutyViolation_over40_exception_PASS_rest_ge11.csv", key="dl_pass")
+
+            # ---- Additional detailed duty violations ----
+            st.markdown("---")
+            st.subheader("Additional Duty Violations")
+
+            # Rest After vs Min (KEEP)
+            if "RestAfter_min" in work.columns:
+                v_after = work.dropna(subset=["RestAfter_act", "RestAfter_min"]).copy()
+                v_after = v_after[v_after["RestAfter_act"] < v_after["RestAfter_min"]]
+                if not v_after.empty:
+                    st.error(f"⚠️ Rest After FDP violations: {len(v_after)} row(s) (act < min)")
+                else:
+                    st.success("✅ No Rest After FDP (act < min) violations found.")
+                st.markdown("**Rest After FDP (act) < Rest After FDP (min)**")
+                st.dataframe(v_after, use_container_width=True)
+                to_csv_download(v_after, "Violation_RestAfter_act_lt_min.csv", key="dl_rest_after")
+            else:
+                st.info("Rest After FDP (min) column not found; skipping that check.")
+
+            # FDP act vs max (KEEP)
+            if "FDP_act" in work.columns and "FDP_max" in work.columns:
+                v_fdp = work.dropna(subset=["FDP_act", "FDP_max"]).copy()
+                v_fdp = v_fdp[v_fdp["FDP_act"] > v_fdp["FDP_max"]]
+                if not v_fdp.empty:
+                    st.error(f"⚠️ FDP Max violations: {len(v_fdp)} row(s) (act > max)")
+                else:
+                    st.success("✅ No FDP act > max violations found.")
+                st.markdown("**Flight Duty Period (act) > Flight Duty Period (max)**")
+                st.dataframe(v_fdp, use_container_width=True)
+                to_csv_download(v_fdp, "Violation_FDP_act_gt_max.csv", key="dl_fdp")
+            else:
+                st.info("FDP (act/max) columns not found; skipping that check.")
+
+            # Consecutive short rest (Rest Before & Rest After both < 11h)
+            if "RestBefore_act" in work.columns and short_rest_rows is not None:
+                short_both = short_rest_rows[
+                    (short_rest_rows["RestAfter_act"] < 11.0) & (short_rest_rows["RestBefore_act"] < 11.0)
+                ].copy()
+
+                if "DutyDate" in short_both.columns:
+                    display_cols = ["Pilot", "DutyDate"]
+                elif "Date" in short_both.columns:
+                    display_cols = ["Pilot", "Date"]
+                else:
+                    display_cols = ["Pilot"]
+
+                for extra_col in [
+                    "RestBefore_act",
+                    "RestAfter_act",
+                    "RestBefore_min",
+                    "RestAfter_min",
+                    "Hours7d",
+                    "Hours30d",
+                    "FDP_act",
+                    "FDP_max",
+                ]:
+                    if extra_col in short_both.columns:
+                        display_cols.append(extra_col)
+
+                short_both_display = short_both[display_cols].sort_values(display_cols[:2]) if len(display_cols) >= 2 else short_both[display_cols]
+
+                if not short_both_display.empty:
+                    st.error(
+                        f"⚠️ Consecutive short rest: {len(short_both_display)} row(s) with Rest Before & Rest After FDP (act) < 11 h"
+                    )
+                else:
+                    st.success("✅ No consecutive short rest (Rest Before & Rest After FDP act < 11 h) found.")
+                st.markdown("**Rest Before & Rest After FDP (act) both < 11 h**")
+                st.dataframe(short_both_display, use_container_width=True)
+                to_csv_download(short_both_display, "Violation_RestBefore_and_After_act_lt11.csv", key="dl_rest_before_after")
+            else:
+                st.info("Rest Before FDP (act) column not found; skipping consecutive short rest check.")
+
+            # Full export
+            to_csv_download(work, "DutyViolation_with_Rest_and_DetailedChecks.csv", key="dl_all")
+
+with tab_min_rest:
+    st.header("12+ hr Duty Day Counter (Using Rest Marker as Day Boundary)")
+
+    if ftl_df is None:
+        st.info("Upload the FTL CSV to compute 12+ hr duty days.")
+    else:
+        df = ftl_df.copy()
+
+        # --------------------------------------
+        # Auto-detect columns
+        # --------------------------------------
+        pilot_col, date_col = infer_common_columns(df.copy())
+        duty_col = infer_duty_column(df.copy())
+        rest_marker_col = infer_duty_day_boundary_column(df.copy())
+        begin_cols, _ = infer_begin_end_columns(df.copy(), date_col=date_col)
+
+        st.subheader("Column Mapping")
+        c1, c2, c3, c4 = st.columns(4)
+
+        with c1:
+            pilot_col = st.selectbox(
+                "Pilot column",
+                df.columns,
+                index=list(df.columns).index(pilot_col) if pilot_col in df.columns else 0
+            )
+        with c2:
+            date_col = st.selectbox(
+                "Date column",
+                df.columns,
+                index=list(df.columns).index(date_col) if date_col in df.columns else 0
+            )
+        with c3:
+            duty_col = st.selectbox(
+                "Duty length column",
+                df.columns,
+                index=list(df.columns).index(duty_col) if duty_col in df.columns else 0
+            )
+        with c4:
+            rest_marker_col = st.selectbox(
+                "Rest-marker column (indicates END of a duty day)",
+                df.columns,
+                index=list(df.columns).index(rest_marker_col) if rest_marker_col in df.columns else 0
+            )
+
+        # --------------------------------------
+        # Parse values
+        # --------------------------------------
+        work = df.copy()
+        work[pilot_col] = work[pilot_col].ffill()
+
+        # Duty hours
+        work["DutyHours"] = work[duty_col].map(parse_duration_to_hours)
+
+        # Build a date series combining the date column + begin/report times
+        date_series = _coalesce_datetime_columns(work, date_col, begin_cols)
+        date_series = _normalize_dates(date_series)
+        work["DutyDate"] = date_series
+
+        # Boundary detection
+        work["BoundaryRest"] = work[rest_marker_col].astype(str).str.contains("rest", case=False, na=False)
+
+        # Row ordering for grouping
+        work["__row_order"] = np.arange(len(work))
+
+        # --------------------------------------
+        # Reconstruct duty days using the rest boundary
+        # --------------------------------------
+        records = []
+        for pilot, sub in work.groupby(pilot_col):
+            sub = sub.sort_values(["DutyDate", "__row_order"])
+
+            current_date = None
+            collected_hours = []
+
+            for _, row in sub.iterrows():
+                ddate = row["DutyDate"]
+                if pd.isna(ddate):
+                    continue
+
+                if current_date is None:
+                    current_date = ddate
+
+                if not pd.isna(row["DutyHours"]):
+                    collected_hours.append(row["DutyHours"])
+
+                # When boundary line hits → close out duty day
+                if row["BoundaryRest"]:
+                    if collected_hours:
+                        records.append({
+                            "Pilot": pilot,
+                            "Date": current_date,
+                            "DutyHours": max(collected_hours)
+                        })
+                    current_date = None
+                    collected_hours = []
+
+            # End-of-file open block (if no final rest cell)
+            if current_date is not None and collected_hours:
+                records.append({
+                    "Pilot": pilot,
+                    "Date": current_date,
+                    "DutyHours": max(collected_hours)
+                })
+
+        duty_days = pd.DataFrame(records)
+
+        if duty_days.empty:
+            st.warning("No valid duty days could be reconstructed with the selected columns.")
+            st.stop()
+
+        # Normalize and filter long duty days
+        duty_days["Date"] = duty_days["Date"].dt.date
+        duty_days["DutyHours"] = duty_days["DutyHours"].round(2)
+        duty_days["LongDuty"] = duty_days["DutyHours"] >= 12.0
+
+        long_only = duty_days[duty_days["LongDuty"]].copy()
+
+        # --------------------------------------
+        # Deduplicate: one row per (Pilot, Date), keeping the FINAL/MAX duty hours
+        # --------------------------------------
+        detail = (
+            long_only.sort_values(["Pilot", "Date", "DutyHours"], ascending=[True, True, False])
+                     .groupby(["Pilot", "Date"], as_index=False)
+                     .first()
+        )
+
+        # --------------------------------------
+        # Summary built from DEDUPLICATED rows
+        # --------------------------------------
+        summary = (
+            detail.groupby("Pilot")
+                .agg(
+                    Days=("Date", "nunique"),
+                    AvgHours=("DutyHours", "mean"),
+                    MaxHours=("DutyHours", "max")
+                )
+                .reset_index()
+        )
+
+        summary["AvgHours"] = summary["AvgHours"].round(2)
+        summary["MaxHours"] = summary["MaxHours"].round(2)
+
+        # --------------------------------------
+        # Display Summary
+        # --------------------------------------
+        st.subheader("Summary — Days with Duty ≥ 12.0 hr")
+
+        if summary.empty:
+            st.success("No pilots have 12+ hr duty days in this period.")
+        else:
+            total_days = summary["Days"].sum()
+            st.error(f"⚠️ {total_days} long duty days across {len(summary)} pilots")
+
+        st.dataframe(summary, use_container_width=True)
+        to_csv_download(summary, "FTL_12hr_duty_summary.csv", key="dl_12hr_summary")
+
+        # --------------------------------------
+        # Display Detail
+        # --------------------------------------
+        st.subheader("Detail — Each 12+ hr Duty Day (deduplicated)")
+
+        st.dataframe(detail, use_container_width=True)
+        to_csv_download(detail, "FTL_12hr_duty_details.csv", key="dl_12hr_details")
+
+# ============================================================
+# TAB: Flight Time Threshold Checker
+# ============================================================
+with tab_ft_exceed:
+    st.header("Flight Time Threshold Checker")
+
+    if ftl_df is None:
+        st.info("Upload the FTL CSV in the sidebar to run this check.")
+        st.stop()
+
+    df = ftl_df.copy()
+
+    # ---------------------------------------------------------
+    # Column mapping
+    # ---------------------------------------------------------
+    pilot_col = "Name"
+
+    # Column O should contain Flight Time totals
+    if len(df.columns) < 15:
+        st.error("Could not locate Column O (Flight Time). The FTL file format may be incorrect.")
+        st.stop()
+
+    flight_time_col = df.columns[14]  # 0-indexed → Column O
+
+    st.subheader("Column Mapping")
+    c1, c2 = st.columns(2)
+    with c1:
+        pilot_col = st.selectbox(
+            "Pilot / Name column",
+            df.columns,
+            index=list(df.columns).index(pilot_col) if pilot_col in df.columns else 0
+        )
+    with c2:
+        flight_time_col = st.selectbox(
+            "Flight Time column (Column O)",
+            df.columns,
+            index=list(df.columns).index(flight_time_col) if flight_time_col in df.columns else 0
+        )
+
+    # ---------------------------------------------------------
+    # Threshold selector
+    # ---------------------------------------------------------
+    threshold = st.number_input(
+        "Minimum Flight Time to Flag (hours)",
+        min_value=0.0,
+        max_value=200.0,
+        value=64.0,
+        step=0.5,
+        format="%.2f"
+    )
+
+    # ---------------------------------------------------------
+    # Preprocess
+    # ---------------------------------------------------------
+    # Forward-fill the pilot names (FL3XX leaves blanks under each pilot)
+    df["PilotName"] = df[pilot_col].ffill()
+
+    # Parse durations (robust Excel fixes included)
+    df["FlightTimeHours"] = df[flight_time_col].map(parse_duration_to_hours)
+
+    # ---------------------------------------------------------
+    # IDENTIFY SUMMARY ROWS
+    # Correct logic:
+    # - Flight Time column has a value
+    # - All flight-leg columns E–N are blank (columns 4 through 13)
+    # ---------------------------------------------------------
+    detail_cols = df.columns[4:14]  # E through N inclusive
+
+    df["IsSummaryRow"] = (
+        df["FlightTimeHours"].notna() &
+        df[detail_cols].astype(str).apply(lambda row: all(x.strip() == "" for x in row), axis=1)
+    )
+
+    summary_rows = df[df["IsSummaryRow"]].copy()
+
+    if summary_rows.empty:
+        st.warning("No pilot summary rows detected. Check whether column O contains total flight time entries.")
+        st.stop()
+
+    # ---------------------------------------------------------
+    # Build clean summary table
+    # ---------------------------------------------------------
+    summary_rows = summary_rows[["PilotName", "FlightTimeHours"]].copy()
+    summary_rows["FlightTimeHours"] = summary_rows["FlightTimeHours"].round(2)
+
+    # ---------------------------------------------------------
+    # Pilots exceeding threshold
+    # ---------------------------------------------------------
+    exceed = summary_rows[summary_rows["FlightTimeHours"] >= threshold].copy()
+
+    st.subheader("Pilots Exceeding Flight Time Threshold")
+
+    if exceed.empty:
+        st.success(f"No pilots exceeded {threshold:.2f} hours of flight time.")
+    else:
+        st.error(f"⚠️ {len(exceed)} pilot(s) exceeded {threshold:.2f} hours.")
+        st.dataframe(exceed, use_container_width=True)
+
+        to_csv_download(
+            exceed,
+            f"FTL_flight_time_exceeding_{threshold:.2f}_hours.csv",
+            key="dl_ft_exceed"
+        )
+
+    # ---------------------------------------------------------
+    # Full summary
+    # ---------------------------------------------------------
+    st.subheader("All Pilot Flight Time Totals")
+    st.dataframe(summary_rows, use_container_width=True)
+
+    to_csv_download(
+        summary_rows,
+        "FTL_flight_time_totals_all_pilots.csv",
+        key="dl_ft_all"
+    )
+
+
+
 with tab_debug:
-    st.caption("If you want coverage/normalized tables in this version's Debug tab, I can add them.")
+    st.write("Debug tab is working.")
+    st.header("FTL Debug — Inspect Raw Columns E–O")
+
+    # Load the same FTL CSV as the other tabs
+    df = st.session_state.get("ftl_df")
+
+    if df is None:
+        st.info("Upload the FTL CSV to inspect its raw structure.")
+        st.stop()
+
+    df = df.copy()
+
+    # ------------------------------------------------
+    # Show raw columns E–O with Name for reference
+    # ------------------------------------------------
+    st.write("### First 50 rows (Columns E–O + raw Name)")
+
+    detail = df.iloc[:, 4:15].copy()   # Columns E through O
+    detail["raw_name"] = df.iloc[:, 0] # Column A (Name)
+
+    st.dataframe(detail.head(50), use_container_width=True)
+
+    # ------------------------------------------------
+    # Show rows where Column O contains flight time
+    # ------------------------------------------------
+    st.write("### Rows where Column O (Flight Time) is non-empty")
+
+    col_O = df.columns[14]  # Column O explicitly
+
+    mask_ft = df[col_O].astype(str).str.strip() != ""
+    st.dataframe(df[mask_ft].iloc[:, :15], use_container_width=True)
