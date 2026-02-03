@@ -383,6 +383,8 @@ def _coalesce_datetime_columns(df, primary_col, fallback_cols):
 def _normalize_dates(series):
     if series.empty:
         return series
+    if not pd.api.types.is_datetime64_any_dtype(series):
+        series = pd.to_datetime(series, errors="coerce", dayfirst=True, utc=True)
     dtype = series.dtype
     if hasattr(dtype, "tz") and dtype.tz is not None:
         try:
