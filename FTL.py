@@ -612,13 +612,14 @@ if dv_df is not None:
 # -----------------------------
 # Tabs
 # -----------------------------
-tab_results, tab_rest_duty, tab_policy, tab_min_rest, tab_ft_exceed, tab_debug = st.tabs([
+tab_results, tab_rest_duty, tab_policy, tab_min_rest, tab_ft_exceed, tab_debug, tab_rest_duty_12 = st.tabs([
     "Results (FTL)",
     "Rest Periods Under 11 Hours (FTL)",
     "7d/30d Policy (Duty Violation)",
     "Total 12+ Hour Duty Days (FTL)",
     "Flight Time Threshold Checker",
-    "Debug"
+    "Debug",
+    "Rest Periods Under 12 Hours (FTL)"
 ])
 
 with tab_results:
@@ -745,6 +746,56 @@ with tab_rest_duty:
             st.markdown("**Detailed minimum rest days (10.0–10.99 h)**")
             st.dataframe(detail, use_container_width=True)
             to_csv_download(detail, "FTL_min_rest_day_details.csv", key="dl_min_rest_details")
+
+with tab_rest_duty_12:
+    st.caption("Upload an FTL CSV with a rest prior column to count minimum rest days (11.0–11.99 h).")
+
+    if ftl_df is None:
+        st.info("Upload the **FTL CSV** in the sidebar to calculate minimum rest days.")
+    else:
+        df = ftl_df
+        pilot_col, date_col = infer_common_columns(df.copy())
+        rest_before_col, _ = infer_rest_pair_columns_ftl(df.copy())
+
+        st.markdown("**Rest prior column**")
+        rest_options = list(df.columns)
+        default_index = 0
+        if rest_before_col in rest_options:
+            default_index = rest_options.index(rest_before_col)
+        else:
+            rest_like = [i for i, name in enumerate(rest_options) if re.search(r"rest", str(name), re.I)]
+            if rest_like:
+                default_index = rest_like[0]
+
+        rest_column = st.selectbox(
+            "Select the column that contains rest prior values",
+            options=rest_options,
+            index=default_index if rest_options else None,
+            key="rest_prior_column_12",
+        ) if rest_options else None
+
+        if not (pilot_col and date_col):
+            st.error("Could not identify the Pilot and Date columns in the FTL CSV.")
+        elif rest_column is None:
+            st.error("No columns available to evaluate rest prior values.")
+        else:
+            summary, detail = summarize_min_rest_days(
+                df.copy(), pilot_col, date_col, rest_column, short_thresh=12.0, lower_bound=11.0
+            )
+
+            st.subheader("Days with minimum rest (11.0–11.99 h) by pilot")
+            if summary.empty:
+                st.success("✅ No minimum rest days detected in the provided period.")
+            else:
+                st.error(
+                    f"⚠️ Minimum rest triggered for {summary['DaysWithMinRest'].sum()} day(s) across {len(summary)} pilot(s)."
+                )
+            st.dataframe(summary, use_container_width=True)
+            to_csv_download(summary, "FTL_min_rest_days_by_pilot_under_12.csv", key="dl_min_rest_summary_12")
+
+            st.markdown("**Detailed minimum rest days (11.0–11.99 h)**")
+            st.dataframe(detail, use_container_width=True)
+            to_csv_download(detail, "FTL_min_rest_day_details_under_12.csv", key="dl_min_rest_details_12")
 
 with tab_policy:
     if dv_df is None:
