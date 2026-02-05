@@ -748,7 +748,7 @@ with tab_rest_duty:
             to_csv_download(detail, "FTL_min_rest_day_details.csv", key="dl_min_rest_details")
 
 with tab_rest_duty_12:
-    st.caption("Upload an FTL CSV with a rest prior column to count minimum rest days (11.0–11.99 h).")
+    st.caption("Upload an FTL CSV with a rest prior column to count minimum rest days (10.0–11.99 h).")
 
     if ftl_df is None:
         st.info("Upload the **FTL CSV** in the sidebar to calculate minimum rest days.")
@@ -780,10 +780,10 @@ with tab_rest_duty_12:
             st.error("No columns available to evaluate rest prior values.")
         else:
             summary, detail = summarize_min_rest_days(
-                df.copy(), pilot_col, date_col, rest_column, short_thresh=12.0, lower_bound=11.0
+                df.copy(), pilot_col, date_col, rest_column, short_thresh=12.0, lower_bound=10.0
             )
 
-            st.subheader("Days with minimum rest (11.0–11.99 h) by pilot")
+            st.subheader("Days with minimum rest (10.0–11.99 h) by pilot")
             if summary.empty:
                 st.success("✅ No minimum rest days detected in the provided period.")
             else:
@@ -793,7 +793,7 @@ with tab_rest_duty_12:
             st.dataframe(summary, use_container_width=True)
             to_csv_download(summary, "FTL_min_rest_days_by_pilot_under_12.csv", key="dl_min_rest_summary_12")
 
-            st.markdown("**Detailed minimum rest days (11.0–11.99 h)**")
+            st.markdown("**Detailed minimum rest days (10.0–11.99 h)**")
             st.dataframe(detail, use_container_width=True)
             to_csv_download(detail, "FTL_min_rest_day_details_under_12.csv", key="dl_min_rest_details_12")
 
